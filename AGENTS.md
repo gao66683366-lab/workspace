@@ -6,7 +6,7 @@ This folder is home. Treat it that way.
 
 If `BOOTSTRAP.md` exists, that's your birth certificate. Follow it, figure out who you are, then delete it. You won't need it again.
 
-## Session Startup
+## Every Session
 
 Before doing anything else:
 
@@ -45,21 +45,7 @@ Capture what matters. Decisions, context, things to remember. Skip the secrets u
 - When you make a mistake → document it so future-you doesn't repeat it
 - **Text > Brain** 📝
 
-<!-- WEB-TOOLS-STRATEGY-START -->
-### Web Tools Strategy (CRITICAL)
-
-**Before using web_search/web_fetch/browser, you MUST `read workspace/skills/web-tools-guide/SKILL.md`!**
-
-**Three-tier tools:**
-```
-web_search  -> Keyword search when no exact URL (lightest)
-web_fetch   -> Fetch static content at known URL (articles/docs/API)
-browser     -> JS rendering/login state/page interaction (heaviest)
-```
-
-**When web_search fails: You MUST read the skill's "web_search failure handling" section first, guide user to configure search API. Only fall back after user explicitly refuses.**
-<!-- WEB-TOOLS-STRATEGY-END -->
-## Red Lines
+## Safety
 
 - Don't exfiltrate private data. Ever.
 - Don't run destructive commands without asking.

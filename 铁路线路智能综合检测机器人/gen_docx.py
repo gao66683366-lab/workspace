@@ -1,0 +1,546 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+from docx import Document
+from docx.shared import Pt, Inches, RGBColor
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml.ns import qn
+from docx.oxml import OxmlElement
+
+doc = Document()
+
+sections = doc.sections
+for section in sections:
+    section.top_margin = Inches(1)
+    section.bottom_margin = Inches(1)
+    section.left_margin = Inches(1.2)
+    section.right_margin = Inches(1.2)
+
+def set_heading(para, text, level):
+    run = para.add_run(text)
+    run.bold = True
+    if level == 1:
+        run.font.size = Pt(16)
+        para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    elif level == 2:
+        run.font.size = Pt(13)
+        run.font.color.rgb = RGBColor(0x1F, 0x49, 0x7D)
+    elif level == 3:
+        run.font.size = Pt(11)
+        run.font.color.rgb = RGBColor(0x2E, 0x74, 0xB5)
+    para.paragraph_format.space_before = Pt(10)
+    para.paragraph_format.space_after = Pt(4)
+
+def add_para(doc, text, bold=False):
+    p = doc.add_paragraph()
+    run = p.add_run(text)
+    run.font.size = Pt(11)
+    run.bold = bold
+    p.paragraph_format.space_after = Pt(4)
+    return p
+
+def add_bullet(doc, text):
+    p = doc.add_paragraph(style='List Bullet')
+    p.add_run(text).font.size = Pt(11)
+    p.paragraph_format.space_after = Pt(3)
+    return p
+
+def add_table(doc, headers, rows):
+    table = doc.add_table(rows=1 + len(rows), cols=len(headers))
+    table.style = 'Table Grid'
+    hdr = table.rows[0]
+    for i, h in enumerate(headers):
+        cell = hdr.cells[i]
+        cell.text = h
+        for p in cell.paragraphs:
+            for r in p.runs:
+                r.bold = True
+                r.font.size = Pt(10)
+        shd = OxmlElement('w:shd')
+        shd.set(qn('w:val'), 'clear')
+        shd.set(qn('w:color'), 'auto')
+        shd.set(qn('w:fill'), 'D9E2F3')
+        cell._tc.get_or_add_tcPr().append(shd)
+    for ri, row in enumerate(rows):
+        tr = table.rows[ri + 1]
+        for ci, cell_text in enumerate(row):
+            tr.cells[ci].text = cell_text
+            for p in tr.cells[ci].paragraphs:
+                for r in p.runs:
+                    r.font.size = Pt(10)
+        if ri % 2 == 0:
+            for ci in range(len(row)):
+                cell = tr.cells[ci]
+                shd = OxmlElement('w:shd')
+                shd.set(qn('w:val'), 'clear')
+                shd.set(qn('w:color'), 'auto')
+                shd.set(qn('w:fill'), 'F2F2F2')
+                cell._tc.get_or_add_tcPr().append(shd)
+    return table
+
+def add_section_heading(doc, text, level):
+    h = doc.add_paragraph()
+    set_heading(h, text, level)
+
+# ─── Title ───────────────────────────────────────────────────────────────────
+title = doc.add_paragraph()
+title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+r = title.add_run("铁路线路智能综合检测机器人\n技术文档")
+r.bold = True
+r.font.size = Pt(22)
+title.paragraph_format.space_after = Pt(6)
+
+meta = doc.add_paragraph()
+meta.alignment = WD_ALIGN_PARAGRAPH.CENTER
+meta.add_run("文档版本：V2.0    编制日期：2026 年 4 月    汇报单位：____________________").font.size = Pt(10)
+meta.paragraph_format.space_after = Pt(20)
+
+# ─── 01 ──────────────────────────────────────────────────────────────────────
+add_section_heading(doc, "01 项目背景与现存问题", 1)
+
+add_section_heading(doc, "一、传统人工巡检面临的核心挑战", 2)
+add_para(doc, "当前我国铁路线路日常检测作业仍以人工步行巡检为主要模式，在现代化铁路运维体系下，已暴露出多方面突出短板与安全隐患：")
+items = [
+    ("作业效率极低", "人工步行巡检速度仅 1.1~1.5 km/h，受体力与作业时长限制，单日最大检测里程不足 6 km，难以满足高密度、长距离线路巡检需求。"),
+    ("数据离散不可靠", "完全依靠人工手写、口头记录，数据格式不统一、标准不规范，无法实现历史数据横向对比与纵向追溯，难以支撑科学分析。"),
+    ("检测质量不稳定", "检测结果高度依赖巡检人员经验、责任心与身体状态，人员差异直接导致判定标准不一，漏检、误检风险居高不下。"),
+    ("作业场景受限", "夜间、恶劣天气、复杂区段无法开展有效巡检，形成长期运维盲区，给线路长期安全运行埋下隐患。"),
+    ("综合成本高昂", "需投入大量人力、物力长期值守作业，人工成本、管理成本、后勤保障成本持续居高不下。"),
+]
+for t, b in items:
+    p = doc.add_paragraph(style='List Bullet')
+    r1 = p.add_run(t + "：")
+    r1.bold = True
+    r1.font.size = Pt(11)
+    r2 = p.add_run(b)
+    r2.font.size = Pt(11)
+    p.paragraph_format.space_after = Pt(3)
+
+add_section_heading(doc, "二、系统化解决方案", 2)
+add_para(doc, "本项目研发的铁路线路智能综合检测机器人，是面向铁路工务运维场景打造的一体化、智能化、多模态综合检测专用装备，可全面替代传统人工与分散式单功能设备：")
+sol = [
+    "稳定运行速度 1 m/s，单次连续作业 2 小时，单日稳定覆盖线路约 6 公里，可全天候连续可靠作业。",
+    "单机同步完成 8 项核心检测项目，一次出动即可完成全线关键指标采集，无需多次上道、重复作业。",
+    "具备实时数据采集、实时智能分析、实时异常报警能力，全程无需人工看图判伤，大幅降低人工依赖。",
+    "采集数据标准化、结构化、可追溯、可对比，支持自动生成专业检测报告，数据闭环可查。",
+    "综合作业效率较传统人工提升 50~60 倍，数据客观性、一致性、完整性全面优于人工巡检。",
+]
+for s in sol:
+    add_bullet(doc, s)
+
+# ─── 02 ──────────────────────────────────────────────────────────────────────
+doc.add_page_break()
+add_section_heading(doc, "02 综合检测核心理念与价值", 1)
+
+add_section_heading(doc, '一、什么是"综合检测"', 2)
+add_para(doc, "本机器人并非单一功能检测仪器的简单叠加，而是一套多传感器协同、多算法融合、多维度判定的完整智能检测系统，与传统设备对比如下：")
+add_table(doc,
+    ["对比维度", "传统单功能检测设备", "本系统（综合检测模式）"],
+    [
+        ["检测项目数量", "单次仅支持 1 项检测", "8 项指标同步并行检测"],
+        ["作业组织方式", "多次出动、多人分工协作", "一次上道、单人操作完成全部"],
+        ["数据关联性", "各模块数据孤立，无法融合", "同源数据统一时空基准，交叉印证"],
+        ["全生命周期成本", "成本高（需采购多套设备）", "成本低（一机多用，减少投入）"],
+        ["检测数据质量", "人为干扰大，结果不稳定", "统一标准、AI 判定，客观一致"],
+        ["病害分析深度", "单维度孤立判定", "多源数据融合，综合判级更精准"],
+    ]
+)
+doc.add_paragraph()
+
+add_section_heading(doc, "二、综合检测的三大融合层次", 2)
+融合 = [
+    ("（1）多检测项目融合", "单机同步实现：轨面缺陷、道钉/螺栓状态、3D 钢轨轮廓、波磨、焊缝、轨距、水平、高低共 8 大类检测，一台设备覆盖线路核心检测项目。"),
+    ("（2）多传感器融合", "搭载 6 路 2D 工业相机 + 2 路 3D 线激光 + 2 路高精度双陀螺仪，实现毫秒级时间戳同步、统一坐标系标定、多传感器数据互相校验、冗余容错。"),
+    ("（3）多维度数据融合", "将 2D 图像流、3D 点云流、姿态参数流在统一时空框架下对齐汇入，实现图像 + 轮廓 + 姿态联合分析，大幅降低误报率、提升判伤准确率。"),
+]
+for t, b in 融合:
+    p = doc.add_paragraph()
+    r1 = p.add_run(t + "：")
+    r1.bold = True
+    r1.font.size = Pt(11)
+    r2 = p.add_run(b)
+    r2.font.size = Pt(11)
+    p.paragraph_format.space_after = Pt(6)
+
+# ─── 03 ──────────────────────────────────────────────────────────────────────
+doc.add_page_break()
+add_section_heading(doc, "03 系统总体架构与融合设计", 1)
+
+add_section_heading(doc, "一、四环闭环智能架构", 2)
+add_para(doc, "本系统采用感知→采集→处理→决策四环闭环架构，实现全流程智能化运转：")
+arch = [
+    ("智能化设备加持", "硬件层集成多模态传感器、精密机械结构、高性能工控机，为稳定感知提供硬件基础。"),
+    ("智能检测入口", "6 路 2D 相机 + 2 路 3D 激光 + 2 路陀螺仪同步触发采集，统一时间戳、统一里程坐标。"),
+    ("实时智能处理", "AI 缺陷识别→自动分级判定→实时异常报警，全程不依赖人工看图，检测结果即时输出。"),
+    ("大数据智能分析", "历史数据积累→病害热点分析→劣化趋势预测→线路健康一张图→支撑预测性养护。"),
+]
+for t, b in arch:
+    p = doc.add_paragraph(style='List Bullet')
+    r1 = p.add_run(t + "：")
+    r1.bold = True
+    r1.font.size = Pt(11)
+    r2 = p.add_run(b)
+    r2.font.size = Pt(11)
+
+add_section_heading(doc, "二、三层精密融合设计（有机融合，非简单堆砌）", 2)
+layers = [
+    ("1. 传感器层有机融合", [
+        "2D 图像 + 3D 轮廓：同位置同步采集，缺陷与形变互相印证。",
+        "图像数据 + 姿态参数：缺陷位置绑定姿态角，定位更精准。",
+        "左右钢轨双侧独立检测：对称采集、独立判定、结果互补。",
+        "主检 + 复核机制：重点区段双重采集、双重确认，降低漏检。",
+    ]),
+    ("2. 通信层精密协同", [
+        "EtherCAT 硬实时总线：用于伺服驱动控制，确保运动控制毫秒级响应。",
+        "千兆以太网：专用于相机/激光高速数据采集，带宽充足无丢帧。",
+        "4G/5G 无线传输网：用于数据远程上传、远程监控。",
+        "三网物理隔离：控制网、采集网、传输网独立运行，互不干扰、永不堵塞。",
+    ]),
+    ("3. 数据层统一分析", [
+        "三码对齐：Frame ID、里程、时间戳对齐，数据同源可追溯。",
+        "图像流处理：2D 图像流 → AI 缺陷智能识别。",
+        "点云流处理：3D 点云流 → 廓形比对、磨耗计算。",
+        "融合判级：三流数据汇入融合节点，综合判级，输出最终结论。",
+    ]),
+]
+for layer_title, items in layers:
+    p = doc.add_paragraph()
+    r = p.add_run(layer_title)
+    r.bold = True
+    r.font.size = Pt(11)
+    for item in items:
+        add_bullet(doc, item)
+
+# ─── 04 ──────────────────────────────────────────────────────────────────────
+doc.add_page_break()
+add_section_heading(doc, "04 核心检测能力与功能实现", 1)
+
+add_section_heading(doc, "一、八大核心检测功能（一机全覆盖）", 2)
+add_para(doc, "单机一次通过，即可同步输出全部检测结果，实现数据同源、同时采集、同标准判定。")
+add_table(doc,
+    ["序号", "检测功能", "搭载传感器", "输出结果"],
+    [
+        ["01", "轨面缺陷检测", "2D 工业相机 ×2", "裂纹、掉块、凹陷，精确定位 + 损伤等级"],
+        ["02", "道钉/螺栓检测", "2D 工业相机 ×2", "缺失、松动、歪斜，位置统计 + 数量统计"],
+        ["03", "3D 钢轨轮廓检测", "3D 线激光 ×2", "磨耗量、横移量、廓形偏差、超限判定"],
+        ["04", "钢轨波磨检测", "3D 线激光 + 相机", "波长、波深、分布里程、劣化程度"],
+        ["05", "钢轨焊缝检测", "2D 工业相机 ×2", "焊缝缺陷类型、等级、位置标记"],
+        ["06", "轨距检测", "多传感器融合", "轨距实际值、偏差值、超限标记"],
+        ["07", "水平检测", "双陀螺仪", "水平偏差、左右倾斜、平顺性指标"],
+        ["08", "高低检测", "双陀螺仪", "高低不平顺值、长波/短波偏差"],
+    ]
+)
+doc.add_paragraph()
+
+add_section_heading(doc, "二、多维数据融合智能判级", 2)
+add_para(doc, "系统采用图像 + 轮廓 + 姿态三源数据联合判定，比单一维度更可靠、更精准，有效避免误报与漏报：")
+add_table(doc,
+    ["检测案例", "2D 图像结果", "3D 廓形结果", "姿态参数结果", "综合最终结论"],
+    [
+        ["案例 A", "疑似裂纹", "无轮廓变形", "姿态无异常", "降级：疑似，建议人工复核"],
+        ["案例 B", "明显裂纹", "局部凹陷变形", "同位置水平、高低异常", "升级：严重缺陷，重点处置"],
+        ["案例 C", "图像正常", "磨耗量超标", "姿态无异常", "直接输出二级报警"],
+    ]
+)
+doc.add_paragraph()
+
+add_section_heading(doc, "三、病害四级判定体系", 2)
+add_table(doc,
+    ["等级", "含义", "处置建议"],
+    [
+        ["正常", "各项指标在允许限值范围内，线路状态良好", "—"],
+        ["一级", "轻微异常，接近阈值", "持续观察，纳入重点跟踪"],
+        ["二级", "明显超限", "纳入计划养护安排"],
+        ["三级", "严重超限，危及行车安全", "须立即处置"],
+    ]
+)
+
+# ─── 05 ──────────────────────────────────────────────────────────────────────
+doc.add_page_break()
+add_section_heading(doc, "05 系统技术规格与交互设计", 1)
+
+add_section_heading(doc, "一、系统核心技术参数", 2)
+add_table(doc,
+    ["项目", "规格参数"],
+    [
+        ["运行速度", "1 m/s（3.6 km/h）"],
+        ["每日作业时长", "2 小时，单日作业里程约 6 公里"],
+        ["2D 工业相机", "6 个，分辨率 2448×2048，帧率 20~25 fps，通信协议 GigE Vision"],
+        ["3D 线激光", "2 个，左右钢轨轨头轮廓测量，垂直向下安装"],
+        ["姿态检测单元", "双高精度陀螺仪，检测水平/高低"],
+        ["工控机网口", "10 路独立网口（EtherCAT + 千兆 + 4G/5G）"],
+        ["主供电系统", "48V 大容量蓄电池组，智能电源管理"],
+        ["防护等级", "工控机 IP54，相机/激光 IP67"],
+        ["安全保护", "硬件独立急停回路，失效导向安全"],
+    ]
+)
+doc.add_paragraph()
+
+add_section_heading(doc, "二、相机安装参数", 2)
+add_table(doc,
+    ["安装位置", "安装高度（相对基准）", "说明"],
+    [
+        ["拍轨面相机", "离钢轨约 180 mm", "拍摄钢轨顶面缺陷"],
+        ["拍道钉/螺栓相机", "离轨面约 270 mm", "拍摄道钉/螺栓状态"],
+    ]
+)
+doc.add_paragraph()
+
+add_section_heading(doc, "三、多模式人机交互系统", 2)
+add_table(doc,
+    ["控制方式", "功能说明", "适用场景"],
+    [
+        ["物理金属按钮", "实体按键，盲操作可靠", "现场紧急操作、屏幕故障兜底"],
+        ["触摸屏控制", "参数配置、状态监控、数据预览", "作业前设置、作业中监控"],
+        ["无线遥控控制", "远程启停、调速、返航", "复杂现场、远距离安全操作"],
+        ["定速巡航", "设定速度自动保持", "保证采集速度一致性"],
+        ["一键定点返航", "自动返回起点", "复杂场景安全回收"],
+        ["语音控制（规划）", "语音指令操控，解放双手", "降低操作门槛，提升便捷性"],
+    ]
+)
+
+# ─── 06 ──────────────────────────────────────────────────────────────────────
+doc.add_page_break()
+add_section_heading(doc, "06 设备运行状态远程监测系统", 1)
+add_para(doc, "设备运行状态远程监测系统，实现机器人全程可视、可测、可控、可预警，让设备状态从看不见、摸不着变为全透明、可监管。")
+
+add_section_heading(doc, "一、四大核心监测维度", 2)
+monitoring = [
+    ("电力状态实时监测", "蓄电池电压、电流、SOC 电量、SOH 健康度、充放电曲线、续航里程预估、欠压/过压/过温报警。价值：秒级实时监测，低于阈值立即报警，避免中途断电抛锚。"),
+    ("传感器状态实时监测", "6 路工业相机在线状态、帧率、丢包率；2 路激光器状态；2 路陀螺仪状态；传感器故障自诊断。价值：任一传感器异常立即发现，确保采集数据有效、完整。"),
+    ("设备工作状态监测", "工控机 CPU、内存、磁盘占用率；进程运行状态；EtherCAT 通信状态；4G/5G 链路状态；本地存储容量。价值：设备健康透明化，远程掌握实时工况。"),
+    ("检测任务实时追踪", "当前里程位置、采集帧数统计、已识别缺陷数量、任务进度、预计剩余时间。价值：任务执行一目了然，便于远程调度、工作汇报。"),
+]
+for t, b in monitoring:
+    p = doc.add_paragraph()
+    r1 = p.add_run(t)
+    r1.bold = True
+    r1.font.size = Pt(11)
+    p.add_run("\n" + b).font.size = Pt(11)
+    p.paragraph_format.space_after = Pt(8)
+
+add_section_heading(doc, "二、远程监测数据链路与通信架构", 2)
+add_table(doc,
+    ["监测对象", "监测参数", "通信方式", "实时性"],
+    [
+        ["蓄电池组（BMS）", "电压、电流、SOC、SOH、温度", "CAN 总线 → 工控机", "秒级"],
+        ["工业相机 ×6", "在线状态、帧率、丢包率", "GigE Vision → 工控机", "秒级"],
+        ["3D 线激光 ×2", "在线状态、数据率、温度", "千兆以太网 → 工控机", "秒级"],
+        ["双陀螺仪", "角速度、姿态角、状态", "串口 → 工控机", "毫秒级"],
+        ["工控机本体", "CPU、内存、磁盘、进程", "本地系统监测", "准实时"],
+        ["通信链路", "4G/5G 信号、带宽、延迟", "工业路由器 → 云端", "准实时"],
+        ["伺服驱动单元", "运行状态、故障码", "EtherCAT → 工控机", "毫秒级"],
+    ]
+)
+doc.add_paragraph()
+
+add_section_heading(doc, "三、远程监测系统用户价值", 2)
+users = [
+    ("现场操作人员", "出发前快速检查设备健康状态，实时掌握电量、传感器状态，避免无效作业。"),
+    ("远程监控中心", "单台设备/多台设备集中监控，大屏可视化展示全线设备工作状态。"),
+    ("管理决策者", "设备利用率、故障率、出勤率自动统计，为排班、资源调配提供数据支撑。"),
+    ("运维保障团队", "故障提前预警、远程快速诊断，减少现场出勤，提升维护效率。"),
+]
+for t, b in users:
+    p = doc.add_paragraph(style='List Bullet')
+    r1 = p.add_run(t + "：")
+    r1.bold = True
+    r1.font.size = Pt(11)
+    p.add_run(b).font.size = Pt(11)
+
+# ─── 07 ──────────────────────────────────────────────────────────────────────
+doc.add_page_break()
+add_section_heading(doc, "07 作业效率与数据质量优势", 1)
+
+add_section_heading(doc, "一、综合效率提升 50~60 倍", 2)
+add_table(doc,
+    ["对比维度", "传统人工巡检", "本智能检测机器人"],
+    [
+        ["运行速度", "1.1~1.5 km/h", "3.6 km/h（是人工的 2.5~3 倍）"],
+        ["夜间作业", "无法开展", "支持，全天候连续作业"],
+        ["设备切换", "需多次更换、多次上道", "一次上道完成全部项目"],
+        ["人工看图判伤", "大量人员长时间作业", "AI 秒级自动识别"],
+        ["单日检测里程", "约 3 km（受疲劳限制）", "约 6 km（2 小时稳定作业）"],
+        ["综合效率", "基准值", "提升约 50~60 倍"],
+    ]
+)
+doc.add_paragraph()
+p = doc.add_paragraph()
+p.add_run("核心结论：完成同等检测里程，人工需投入约 50~60 倍时间成本。").bold = True
+p.paragraph_format.space_after = Pt(10)
+
+add_section_heading(doc, "二、数据真实可靠，彻底规避人工弱点", 2)
+add_table(doc,
+    ["传统人工巡检固有弱点", "本系统智能化解决方案"],
+    [
+        ["人员状态波动（疲劳/情绪/注意力）", "传感器 7×24h 稳定工作，性能无波动"],
+        ["人员经验水平差异大", "AI 模型统一标准，结果客观一致"],
+        ["主观判断偏差大", "算法阈值客观判定，无人工随意性"],
+        ["光线/天气环境干扰强", "专用补光光源 + 主动激光，不受环境影响"],
+        ["记录错误、遗漏、丢失", "每帧数据自动存储，全程无遗漏"],
+        ["数据不可追溯、不可复现", "Frame ID + 里程 + 时间戳，完整可回放"],
+    ]
+)
+
+# ─── 08 ──────────────────────────────────────────────────────────────────────
+doc.add_page_break()
+add_section_heading(doc, "08 线路健康评估与智能养护决策", 1)
+
+add_section_heading(doc, "一、线路健康一张图", 2)
+add_para(doc, "系统将全线检测数据汇聚融合，自动生成铁路线路可视化健康地图：")
+map_items = [
+    ("健康热力图", "按里程区段绿/黄/红三色标识，直观显示高危区段。"),
+    ("缺陷分布图", "按病害类型图标精确定位，对应里程、位置清晰可查。"),
+    ("趋势变化箭头", "显示同一区段历史劣化趋势，判断恶化速度。"),
+    ("综合健康评分", "0~100 分量化评分，支持区段横向对比。"),
+    ("养护履历闭环", "记录养护时间、内容、效果，形成检测→养护→复检→评估闭环。"),
+]
+for t, b in map_items:
+    p = doc.add_paragraph(style='List Bullet')
+    r1 = p.add_run(t + "：")
+    r1.bold = True
+    r1.font.size = Pt(11)
+    p.add_run(b).font.size = Pt(11)
+add_para(doc, "三类用户精准支撑：")
+users3 = [("养护人员", "明确优先处置区段。"), ("管理决策者", "掌握全线整体健康水平。"), ("技术人员", "可追溯病害演变全过程。")]
+for t, b in users3:
+    p = doc.add_paragraph(style='List Bullet')
+    r1 = p.add_run(t + "：")
+    r1.bold = True
+    r1.font.size = Pt(11)
+    p.add_run(b).font.size = Pt(11)
+
+add_section_heading(doc, "二、智能养护决策辅助系统", 2)
+add_para(doc, "养护优先级自动排序：")
+for pt in ["三级缺陷 → 立即处理", "二级缺陷 → 纳入计划养护", "一级缺陷 → 重点跟踪观察"]:
+    add_bullet(doc, pt)
+add_para(doc, "同等级缺陷：趋势恶化区段优先于稳定区段，历史高发区段优先于偶发区段。\n→ 自动输出本周养护建议清单（里程 + 位置 + 缺陷类型 + 建议措施）")
+add_para(doc, "养护效果量化验证：养护完成后，通过二次检测对比数据，直观验证整治效果，形成闭环管理，养护投入产出可量化、可评估。")
+add_para(doc, "预测性维护支撑：基于长期历史数据，智能预测缺陷发展速度，实现从故障维修向预防性维护转变，减少突发病害、降低综合运维成本。")
+
+add_section_heading(doc, "三、大数据分析与智能决策", 2)
+add_para(doc, "系统持续积累全线检测数据，构建铁路线路健康大数据分析平台，通过数据挖掘与智能算法，为线路运维提供科学依据：")
+add_para(doc, "病害热点分析与预警：")
+for h2 in [
+    "多维统计：统计全线各类病害发生频次与分布规律，自动标注高发区段与集中时段。",
+    "异常提醒：单区段病害数量超标时自动预警，提示优先巡检关注。",
+    "关联分析：结合季节、温度、湿度等环境因素，分析病害发生与恶化的相关性。",
+]:
+    add_bullet(doc, h2)
+doc.add_paragraph()
+
+add_para(doc, "劣化趋势预测模型：")
+add_table(doc,
+    ["预测维度", "分析方法", "输出结果"],
+    [
+        ["病害数量预测", "时序分析 + 线性回归", "未来 1/3/6 个月病害数量预估"],
+        ["劣化速度评估", "指数平滑 + 趋势外推", "各区段缺陷恶化速度排名"],
+        ["剩余寿命估算", "威布尔分布 + 历史统计", "关键部件剩余使用寿命预估"],
+        ["养护窗口期建议", "约束优化算法", "最优养护时间节点与资源配置"],
+    ]
+)
+doc.add_paragraph()
+
+add_para(doc, "线路健康综合评分（0~100 分）：")
+add_table(doc,
+    ["评分区间", "健康等级", "养护建议"],
+    [
+        ["90~100", "优秀", "正常巡检，维持现状"],
+        ["75~89", "良好", "关注重点区段，计划性养护"],
+        ["60~74", "一般", "加强监测，优先安排养护"],
+        ["40~59", "较差", "尽快安排养护，缩短巡检周期"],
+        ["0~39", "危险", "立即处置，启动应急养护流程"],
+    ]
+)
+doc.add_paragraph()
+p = doc.add_paragraph()
+p.add_run("核心结论：从被动响应故障升级为主动预防隐患，大数据分析让线路运维更科学、更高效、更智能。").bold = True
+
+# ─── 09 ──────────────────────────────────────────────────────────────────────
+doc.add_page_break()
+add_section_heading(doc, "09 项目总结与未来发展展望", 1)
+
+add_section_heading(doc, "一、核心价值总结", 2)
+add_para(doc, "本铁路线路智能综合检测机器人，以综合检测为核心定位，用一台智能装备全面替代传统多套分散式检测工具与大量人工巡检作业：")
+values = [
+    ("综合检测", "单机完成 8 项核心检测，数据同源、标准统一。"),
+    ("效率革命", "效率提升 50~60 倍，大幅降低人工投入与运维成本。"),
+    ("数据可靠", "AI 判定、客观一致、全程可追溯，彻底规避人工弱点。"),
+    ("实时报警", "三级病害实时发现、实时推送，不漏报、不误报。"),
+    ("健康一张图", "推动养护从经验驱动转向数据驱动。"),
+    ("预测性维护", "从检测现状升级为管控未来，实现铁路运维智能化升级。"),
+]
+for t, b in values:
+    p = doc.add_paragraph(style='List Bullet')
+    r1 = p.add_run(t + "：")
+    r1.bold = True
+    r1.font.size = Pt(11)
+    p.add_run(b).font.size = Pt(11)
+
+add_section_heading(doc, "二、设备全寿命周期管理", 2)
+add_para(doc, "系统建立设备全寿命周期档案，从设备投入使用到报废全程跟踪管理，实现设备资产数字化、养护决策科学化、资源配置最优化：")
+add_para(doc, "设备档案数字化管理：")
+for a in [
+    "静态信息：设备编号、型号、生产厂家、出厂日期、投入使用日期等基础信息。",
+    "动态履历：累计运行里程、累计检测次数、养护记录、维修记录、故障履历。",
+    "部件级管理：重要部件（相机镜头、激光器、电池等）独立建档，支持按部件跟踪管理。",
+]:
+    add_bullet(doc, a)
+doc.add_paragraph()
+
+add_para(doc, "寿命周期阶段管理：")
+add_table(doc,
+    ["阶段", "管理重点", "智能支撑"],
+    [
+        ["磨合期", "运行参数监控、异常预警", "设定基线指标，自动比对偏差"],
+        ["稳定期", "定期检测、预防性养护", "健康评分跟踪，异常提前预警"],
+        ["衰退期", "加密检测、加速养护", "劣化趋势预测，养护时机建议"],
+        ["临界期", "重点监控、计划更换", "剩余寿命预估，更换成本对比"],
+    ]
+)
+doc.add_paragraph()
+
+add_para(doc, "智能养护计划生成：")
+for pl in [
+    "自动排程：根据设备寿命阶段、健康评分、劣化趋势，自动生成季度/月度养护计划。",
+    "灵活配置：支持人工调整计划时间、养护内容，系统自动更新相关档案。",
+    "工单输出：输出养护工单，含里程区段 + 具体位置 + 病害类型 + 建议措施 + 预计工时。",
+]:
+    add_bullet(doc, pl)
+doc.add_paragraph()
+
+add_para(doc, "经济效益分析：")
+for e in [
+    "成本统计：设备采购成本 + 历年养护成本 + 故障损失成本，自动核算全寿命周期总成本。",
+    "策略对比：不同养护策略下的成本对比，支撑最优养护方案选择。",
+    "价值体现：通过预防性养护减少突发故障，降低综合运维成本，提升投资回报率。",
+]:
+    add_bullet(doc, e)
+p = doc.add_paragraph()
+p.add_run("核心价值：设备全寿命周期管理让每一分钱养护投入都可量化、可追溯、可评估。").bold = True
+p.paragraph_format.space_after = Pt(10)
+
+add_section_heading(doc, "三、未来发展展望", 2)
+for f in [
+    "AI 检测模型持续迭代训练，检测精度与覆盖范围持续提升。",
+    "构建铁路线路大数据健康平台，形成全域线路健康档案库。",
+    "持续优化交互方式，推进语音控制、自主避障、自主巡检等功能落地。",
+    "深化预测性维护算法研究，实现真正意义上的智能预警、主动养护。",
+]:
+    add_bullet(doc, f)
+
+# ─── Footer ───────────────────────────────────────────────────────────────────
+doc.add_paragraph()
+doc.add_paragraph()
+p = doc.add_paragraph()
+p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+r = p.add_run("让铁路线路检测从劳动密集型传统作业\n全面转变为智能化、自动化、高效率、高质量的\n科技驱动型运维模式")
+r.italic = True
+r.font.size = Pt(12)
+
+doc.add_paragraph()
+ver = doc.add_paragraph()
+ver.add_run("文档版本说明：\nV1.0 — 初始版本，基于技术汇报 PPT 及相关资料整理\nV1.1 — 融合 Word 版技术报告，修正核心检测功能为 8 项（去除轨向检测），补充远程监测系统章节，统一通信架构、供电防护等参数口径\nV2.0 — 融合比对后最终定稿版本，案例 B 姿态参数修正为水平、高低异常，完善远程监测用户价值描述，全文参数口径统一对齐").font.size = Pt(9)
+
+out = "/root/.openclaw/workspace/铁路线路智能综合检测机器人/铁路线路智能综合检测机器人_技术文档_V2.0_20260415_1405.docx"
+doc.save(out)
+print("Saved:", out)

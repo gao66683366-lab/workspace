@@ -59,7 +59,7 @@ python3 /root/.openclaw/workspace/word_tools/docx_gen.py \
 - 三级标题(####)：黑体12pt，段前10pt/段后4pt
 - 正文：宋体12pt，首行缩进0.74cm，行距22pt
 - 代码块（非架构图）：仿宋10pt，左缩进1.5cm
-- ASCII架构图：灰底表格（F2F2F2），每行一个单元格，仿宋9.5pt
+- ASCII架构图 → matplotlib图片（支持V1.0四层/五层硬件架构、网络三网隔离、软件四层、HMI、数据流、核心价值等类型）
 - 表格：列宽按内容比例分配；表头蓝底(D9E2F3)+黑体粗体；正文宋体10.5pt
 - `**粗体**` → Word粗体，`` `行内代码` `` → Word斜体
 

@@ -24,7 +24,9 @@ LH_CODE   = Pt(15)
 LH_TABLE  = Pt(17)
 INDENT_BODY  = Cm(0.74)
 INDENT_TABLE = Cm(0.2)
-HDR_FILL  = 'D9E2F3'
+HDR_FILL   = 'D9E2F3'
+ALT_FILL   = 'EEF3FA'
+ROW_FILL   = ['FFFFFF', ALT_FILL]
 
 def sf(run, cn, size, bold=False, italic=False, color=None):
     run.font.name = 'Times New Roman'
@@ -208,25 +210,45 @@ def empty(doc):
 
 def h1(doc, text):
     p = doc.add_paragraph()
-    pfmt(p, Pt(20), Pt(8), Pt(30), Cm(0), WD_ALIGN_PARAGRAPH.CENTER)
+    pfmt(p, Pt(22), Pt(10), Pt(32), Cm(0), WD_ALIGN_PARAGRAPH.CENTER)
     r = p.add_run(text)
     sf(r, '黑体', 16, bold=True)
+    # Add bottom border line under h1
+    pPr = p._p.get_or_add_pPr()
+    pBdr = OxmlElement('w:pBdr')
+    bottom = OxmlElement('w:bottom')
+    bottom.set(qn('w:val'), 'single')
+    bottom.set(qn('w:sz'), '12')
+    bottom.set(qn('w:space'), '4')
+    bottom.set(qn('w:color'), '1F497D')
+    pBdr.append(bottom)
+    pPr.append(pBdr)
 
 def h2(doc, text):
     p = doc.add_paragraph()
-    pfmt(p, Pt(14), Pt(6), Pt(22), Cm(0))
+    pfmt(p, Pt(16), Pt(8), Pt(26), Cm(0))
+    # Left accent bar
+    pPr = p._p.get_or_add_pPr()
+    pBdr = OxmlElement('w:pBdr')
+    left = OxmlElement('w:left')
+    left.set(qn('w:val'), 'single')
+    left.set(qn('w:sz'), '18')
+    left.set(qn('w:space'), '8')
+    left.set(qn('w:color'), '3B5998')
+    pBdr.append(left)
+    pPr.append(pBdr)
     r = p.add_run(text)
     sf(r, '黑体', 14, bold=True)
 
 def h3(doc, text):
     p = doc.add_paragraph()
-    pfmt(p, Pt(10), Pt(4), Pt(22), Cm(0))
+    pfmt(p, Pt(12), Pt(4), Pt(22), Cm(0))
     r = p.add_run(text)
     sf(r, '黑体', 12, bold=True)
 
 def body(doc, text):
     p = doc.add_paragraph()
-    pfmt(p, Pt(2), Pt(2), LH_BODY, INDENT_BODY)
+    pfmt(p, Pt(3), Pt(3), LH_BODY, INDENT_BODY)
     fmt_text(p, text, '宋体', 12)
 
 def add_table(doc, rows_data):
@@ -240,27 +262,32 @@ def add_table(doc, rows_data):
     tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
     tbl.style = 'Table Grid'
     widths = col_widths(rows_data)
-    set_table_border(tbl, '000000', '6')
+    set_table_border(tbl, '3B5998', '6')
     for ri, row_vals in enumerate(rows_data):
         row = tbl.rows[ri]
         is_head = (ri == 0)
+        row_fill = HDR_FILL if is_head else ROW_FILL[ri % 2]
         for ci, val in enumerate(row_vals):
             if ci >= ncols:
                 break
             cell = row.cells[ci]
             cell.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
-            set_border(cell)
+            set_border(cell, color='3B5998', sz='4')
             cell.width = Cm(widths[ci])
             for p in cell.paragraphs:
                 p.clear()
             p = cell.paragraphs[0]
             p.alignment = WD_ALIGN_PARAGRAPH.CENTER if is_head else WD_ALIGN_PARAGRAPH.LEFT
             pfmt(p, Pt(2), Pt(2), LH_TABLE, Cm(0) if is_head else INDENT_TABLE)
-            fmt_text(p, str(val), '黑体' if is_head else '宋体', 10.5)
             if is_head:
                 shade_cell(cell, HDR_FILL)
+                fmt_text(p, str(val), '黑体', 11.5)
                 for r in p.runs:
                     r.font.bold = True
+                    r.font.color.rgb = RGBColor(31, 73, 125)
+            else:
+                shade_cell(cell, row_fill)
+                fmt_text(p, str(val), '宋体', 10.5)
     return tbl
 
 def add_image_to_doc(doc, image_path, width=Cm(15.1)):

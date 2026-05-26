@@ -232,6 +232,9 @@ def body(doc, text):
 def add_table(doc, rows_data):
     if not rows_data:
         return
+    # Fix: detect flat list (single row passed as [col1, col2, ...]) and wrap
+    if rows_data and isinstance(rows_data[0], str):
+        rows_data = [rows_data]
     ncols = max(len(r) for r in rows_data)
     tbl = doc.add_table(rows=len(rows_data), cols=ncols)
     tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
@@ -561,7 +564,9 @@ def parse_md(folder, doc):
                 h3(doc, line[4:].strip())
             elif line.strip().startswith('|'):
                 parts = [p.strip() for p in line.split('|')]
-                if len(parts) > 2 and all(p or parts.index(p) in (0, len(parts)-1) for p in parts):
+                interior = parts[1:-1]
+                is_sep = all(p == '---' for p in interior)
+                if len(parts) > 2 and not is_sep:
                     add_table(doc, [p for p in line.split('|') if p.strip()])
             elif line.strip() and not line.strip().startswith('<!--') and not line.strip().startswith('***'):
                 body(doc, line.strip())

@@ -268,7 +268,22 @@ def add_image_to_doc(doc, image_path, width=Cm(15.1)):
     pfmt(p, Pt(4), Pt(4), Pt(12))
     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
     run = p.add_run()
-    run.add_picture(image_path, width=width)
+    from PIL import Image
+    import io
+    if image_path.endswith('.png'):
+        img = Image.open(image_path)
+        if img.mode == 'RGBA':
+            bg = Image.new('RGB', img.size, (255, 255, 255))
+            bg.paste(img, mask=img.split()[3])
+            img = bg
+        else:
+            img = img.convert('RGB')
+        buf = io.BytesIO()
+        img.save(buf, 'JPEG', quality=90)
+        buf.seek(0)
+        run.add_picture(buf, width=width)
+    else:
+        run.add_picture(image_path, width=width)
 
 def _get_cjk_font():
     import matplotlib.font_manager as fm

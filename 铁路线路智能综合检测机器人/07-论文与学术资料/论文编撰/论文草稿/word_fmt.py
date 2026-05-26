@@ -120,6 +120,11 @@ def format_table(tbl, col_widths_dxa, header_fill='D9E2F3', font_sz=10.5):
             else:
                 for child in list(pPr): pPr.remove(child)
             jc = etree.SubElement(pPr, f'{{{W}}}jc'); jc.set(f'{{{W}}}val', 'center')
+            # 保存文本再清理
+            # Extract text from runs (p.text only gives text before first child, not inside runs)
+            cell_text = ''.join(t.text or '' for t in p.findall(f'{{{W}}}t'))''
+            import sys
+            print(f'DEBUG R{ri}C{ci} cell_text={repr(cell_text[:50])}', file=sys.stderr)
             for r_el in p.findall(f'{{{W}}}r'): p.remove(r_el)
 
             # 新建 run
@@ -129,7 +134,8 @@ def format_table(tbl, col_widths_dxa, header_fill='D9E2F3', font_sz=10.5):
             fe = 'SimHei' if is_header else 'SimSun'
             _rpr(rp, fc, fe, font_sz, True, False)
             t = etree.SubElement(r, f'{{{W}}}t')
-            t.text = cell.paragraphs[0].text
+            t.text = cell_text
+            if cell_text: t.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
             if t.text: t.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
 
     # 表级边框 (备选，增强)

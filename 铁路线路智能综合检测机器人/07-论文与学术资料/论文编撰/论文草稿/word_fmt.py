@@ -122,7 +122,7 @@ def format_table(tbl, col_widths_dxa, header_fill='D9E2F3', font_sz=10.5):
             jc = etree.SubElement(pPr, f'{{{W}}}jc'); jc.set(f'{{{W}}}val', 'center')
             # 保存文本再清理
             # Extract text from runs (p.text only gives text before first child, not inside runs)
-            cell_text = ''.join(t.text or '' for t in p.findall(f'{{{W}}}t'))''
+            cell_text = ''.join(t.text or '' for t in p.findall(f'{{{W}}}t'))
             import sys
             print(f'DEBUG R{ri}C{ci} cell_text={repr(cell_text[:50])}', file=sys.stderr)
             for r_el in p.findall(f'{{{W}}}r'): p.remove(r_el)

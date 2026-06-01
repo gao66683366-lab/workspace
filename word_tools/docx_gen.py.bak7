@@ -306,8 +306,8 @@ def add_table(doc, rows_data):
                 tcPr = tc.get_or_add_tcPr()
                 tcPr.append(vmerge)
                 prev_val[ci] = merge_label  # store plain label for subsequent checks
-            elif prev_val and ci < len(prev_val) and ci == 0 and prev_val[ci] is not None:
-                # Only col 0 triggers vMerge restart
+            elif prev_val and ci < len(prev_val) and prev_val[ci] is not None:
+                # First occurrence of this category - set as merge start
                 shade_cell(cell, row_fill)
                 fmt_text(p, str(val), '宋体', 10.5)
                 vmerge = OxmlElement('w:vMerge')

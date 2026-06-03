@@ -336,14 +336,17 @@ namespace RobotLinkSDK
         
         private static float ReadFloat(byte[] data, int offset)
         {
-            uint bits = ReadUInt32(data, offset);
-            return BitConverter.SingleToUInt32Bits(bits);
+            // little-endian float解析
+            uint bits = ((uint)data[offset]) | ((uint)data[offset + 1] << 8) 
+                     | ((uint)data[offset + 2] << 16) | ((uint)data[offset + 3] << 24);
+            return BitConverter.ToSingle(BitConverter.GetBytes(bits), 0);
         }
         
         private static uint ReadUInt32(byte[] data, int offset)
         {
-            return ((uint)data[offset] << 24) | ((uint)data[offset + 1] << 16) 
-                   | ((uint)data[offset + 2] << 8) | data[offset + 3];
+            // little-endian uint32解析
+            return ((uint)data[offset]) | ((uint)data[offset + 1] << 8) 
+                 | ((uint)data[offset + 2] << 16) | ((uint)data[offset + 3] << 24);
         }
         
         #endregion

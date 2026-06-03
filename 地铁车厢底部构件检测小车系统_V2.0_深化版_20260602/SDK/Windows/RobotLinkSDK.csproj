@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Library</OutputType>
+    <TargetFramework>net6.0-windows</TargetFramework>
+    <ImplicitUsings>using System;</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RootNamespace>RobotLinkSDK</RootNamespace>
+    <Version>1.0.0</Version>
+    <AssemblyName>RobotLinkSDK</AssemblyName>
+    <Description>地铁车厢底部检测机器人控制SDK</Description>
+  </PropertyGroup>
+</Project>

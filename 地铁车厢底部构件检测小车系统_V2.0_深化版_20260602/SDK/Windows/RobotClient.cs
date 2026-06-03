@@ -1,21 +1,11 @@
 using System;
 using System.Collections.Concurrent;
-using System.IO;
 using System.Net.Sockets;
 using System.Threading;
 using System.Threading.Tasks;
 
 namespace RobotLinkSDK
 {
-    /// <summary>
-    /// RobotClient - 机器人主控制客户端
-    /// 
-    /// 设计原则（针对WiFi无线链路）：
-    /// 1. 所有指令必须等待应答，超时重发
-    /// 2. 序列号递增，防止指令重复执行
-    /// 3. 心跳保活，断线自动重连
-    /// 4. 事件驱动，线程安全
-    /// </summary>
     public class RobotClient : IDisposable
     {
         #region 私有字段
@@ -23,27 +13,26 @@ namespace RobotLinkSDK
         private TcpClient? _tcpClient;
         private NetworkStream? _stream;
         private readonly object _sendLock = new();
-        private readonly ConcurrentDictionary<ushort, TaskCompletionSource<AckFrame>> _pendingAcks = new();
+        private readonly object _reconnectLock = new();
+        private readonly ConcurrentDictionary<uint, TaskCompletionSource<AckFrame>> _pendingAcks = new();
         private CancellationTokenSource? _recvCts;
         private CancellationTokenSource? _heartbeatCts;
         private Task? _recvTask;
         private Task? _heartbeatTask;
-        private ushort _nextSequence = 1;
+        private uint _nextSequence = 1;  // 改为uint，避免溢出
         private bool _disposed = false;
+        private bool _isReconnecting = false;
         
-        // 连接参数
         private string _ip = "";
         private int _port = 5000;
-        private int _timeoutMs = 500;      // 指令应答超时
-        private int _maxRetries = 3;      // 最大重发次数
-        private int _heartbeatIntervalMs = 2000;  // 心跳间隔
+        private int _timeoutMs = 500;
+        private int _maxRetries = 3;
+        private int _heartbeatIntervalMs = 2000;
         
-        // 连接状态（volatile保证跨线程可见）
         private volatile bool _isConnected = false;
         private volatile int _consecutiveHeartbeatFailures = 0;
         private const int MAX_HEARTBEAT_FAILURES = 3;
         
-        // 接收缓冲区
         private readonly byte[] _recvBuffer = new byte[8192];
         private int _recvOffset = 0;
         private int _recvLength = 0;
@@ -52,29 +41,17 @@ namespace RobotLinkSDK
 
         #region 事件定义
         
-        /// <summary>连接状态变化事件</summary>
         public event EventHandler<bool>? OnConnectionChanged;
-        
-        /// <summary>系统状态变化事件（1Hz推送）</summary>
         public event EventHandler<SystemStatusData>? OnSystemStatus;
-        
-        /// <summary>报警事件（异常时立即推送）</summary>
         public event EventHandler<AlarmEventArgs>? OnAlarm;
-        
-        /// <summary>自检结果事件</summary>
         public event EventHandler<SelfTestResult>? OnSelfTestResult;
         
         #endregion
 
         #region 属性
         
-        /// <summary>是否已连接</summary>
         public bool IsConnected => _isConnected && _tcpClient?.Connected == true;
-        
-        /// <summary>当前连接IP</summary>
         public string ConnectedIP => _ip;
-        
-        /// <summary>当前延迟（ms）</summary>
         public int Latency { get; private set; } = 0;
         
         #endregion
@@ -82,12 +59,7 @@ namespace RobotLinkSDK
         #region 构造与销毁
         
         public RobotClient() { }
-
-        public RobotClient(string ip, int port = 5000)
-        {
-            _ip = ip;
-            _port = port;
-        }
+        public RobotClient(string ip, int port = 5000) { _ip = ip; _port = port; }
 
         public void Dispose()
         {
@@ -103,7 +75,6 @@ namespace RobotLinkSDK
 
         #region 连接管理
         
-        /// <summary>连接到机器人（异步）</summary>
         public async Task<bool> ConnectAsync(string ip, int port = 5000)
         {
             if (_disposed) throw new ObjectDisposedException(nameof(RobotClient));
@@ -113,18 +84,15 @@ namespace RobotLinkSDK
             
             try
             {
-                _tcpClient = new TcpClient
-                {
-                    NoDelay = true,
-                    Client = { NoDelay = true }
-                };
+                _tcpClient = new TcpClient { NoDelay = true };
+                _tcpClient.Client.NoDelay = true;
                 
                 using var cts = new CancellationTokenSource(5000);
                 await _tcpClient.ConnectAsync(ip, port, cts.Token);
                 
                 _stream = _tcpClient.GetStream();
-                _stream.ReadTimeout = 5000;
-                _stream.WriteTimeout = 5000;
+                _stream.ReadTimeout = Timeout.Infinite;  // 依赖CTS控制，不用Stream超时
+                _stream.WriteTimeout = Timeout.Infinite;
                 
                 _recvCts = new CancellationTokenSource();
                 _recvTask = Task.Run(() => ReceiveLoop(_recvCts.Token), _recvCts.Token);
@@ -136,9 +104,7 @@ namespace RobotLinkSDK
                 _consecutiveHeartbeatFailures = 0;
                 OnConnectionChanged?.Invoke(this, true);
                 
-                // 同步获取一次系统状态
                 await RequestSystemStatusAsync();
-                
                 return true;
             }
             catch (Exception ex)
@@ -149,10 +115,8 @@ namespace RobotLinkSDK
             }
         }
 
-        /// <summary>断开连接</summary>
         public void Disconnect() => CleanupConnection();
         
-        /// <summary>内部清理连接</summary>
         private void CleanupConnection()
         {
             _isConnected = false;
@@ -180,101 +144,94 @@ namespace RobotLinkSDK
 
         #region 核心发送逻辑
         
-        /// <summary>
-        /// 发送指令并等待应答（带超时重发）
-        /// </summary>
         private async Task<AckFrame> SendCommandAsync(byte cmd, byte subcmd, byte[]? payload = null)
         {
             if (!IsConnected || _stream == null)
                 throw new InvalidOperationException("未连接到机器人");
             
-            ushort seq;
-            lock (_sendLock)
-            {
-                seq = _nextSequence++;
-            }
-            
-            // 构建帧（不包含CRC）
             int payloadLen = payload?.Length ?? 0;
-            int frameLen = 2 + 2 + 2 + 1 + 1 + payloadLen; // Header+Seq+Len+CMD+SubCMD+Payload
-            byte[] frameWithoutCRC = new byte[frameLen];
-            int offset = 0;
             
-            // Header: 0xAA55 (big-endian)
-            frameWithoutCRC[offset++] = 0xAA;
-            frameWithoutCRC[offset++] = 0x55;
-            
-            // Sequence: little-endian
-            frameWithoutCRC[offset++] = (byte)(seq & 0xFF);
-            frameWithoutCRC[offset++] = (byte)(seq >> 8);
-            
-            // Length: little-endian (SubCMD + CMD + Payload)
-            ushort length = (ushort)(2 + payloadLen);
-            frameWithoutCRC[offset++] = (byte)(length & 0xFF);
-            frameWithoutCRC[offset++] = (byte)(length >> 8);
-            
-            // CMD
-            frameWithoutCRC[offset++] = cmd;
-            
-            // SubCMD
-            frameWithoutCRC[offset++] = subcmd;
-            
-            // Payload
-            if (payload != null && payload.Length > 0)
-                Buffer.BlockCopy(payload, 0, frameWithoutCRC, offset, payload.Length);
-            
-            // CRC16
-            ushort crc = CRC16.Calc(frameWithoutCRC);
-            byte[] sendData = new byte[frameLen + 2];
-            Buffer.BlockCopy(frameWithoutCRC, 0, sendData, 0, frameLen);
-            sendData[frameLen] = (byte)(crc & 0xFF);
-            sendData[frameLen + 1] = (byte)(crc >> 8);
-            
-            // 创建应答等待
-            var tcs = new TaskCompletionSource<AckFrame>(TaskCreationOptions.RunContinuationsAsynchronously);
-            if (!_pendingAcks.TryAdd(seq, tcs))
-                throw new Exception($"序列号冲突: {seq}");
-            
-            try
+            for (int retry = 0; retry < _maxRetries; retry++)
             {
-                for (int retry = 0; retry < _maxRetries; retry++)
+                uint seq;
+                byte[] sendData;
+                
+                // 每次重试都用新序列号（修复：重发时序列号必须更新）
+                lock (_sendLock)
                 {
-                    try
-                    {
-                        lock (_sendLock)
-                        {
-                            _stream.Write(sendData, 0, sendData.Length);
-                            _stream.Flush();
-                        }
-                        
-                        using var cts = new CancellationTokenSource(_timeoutMs);
-                        var ack = await tcs.Task.WaitAsync(cts.Token);
-                        
-                        if (ack.Status != AckFrame.ACK_OK)
-                            throw new RobotNACKException(ack.Status, seq);
-                        
-                        return ack;
-                    }
-                    catch (TimeoutException)
-                    {
-                        if (retry == _maxRetries - 1)
-                            throw new TimeoutException($"指令0x{cmd:X2}/{subcmd:X2}应答超时（序列{seq}）");
-                        Console.WriteLine($"[RobotClient] 指令超时，重试 {retry + 1}/{_maxRetries}");
-                    }
+                    seq = _nextSequence++;
                 }
-                throw new TimeoutException("达到最大重试次数");
+                
+                // 构建帧
+                int frameLen = 2 + 2 + 2 + 1 + 1 + payloadLen; // Header+Seq+Len+CMD+SubCMD+Payload
+                byte[] frameWithoutCRC = new byte[frameLen];
+                int offset = 0;
+                
+                frameWithoutCRC[offset++] = 0xAA;
+                frameWithoutCRC[offset++] = 0x55;
+                frameWithoutCRC[offset++] = (byte)(seq & 0xFF);
+                frameWithoutCRC[offset++] = (byte)(seq >> 8);
+                ushort length = (ushort)(2 + payloadLen);
+                frameWithoutCRC[offset++] = (byte)(length & 0xFF);
+                frameWithoutCRC[offset++] = (byte)(length >> 8);
+                frameWithoutCRC[offset++] = cmd;
+                frameWithoutCRC[offset++] = subcmd;
+                if (payload != null && payload.Length > 0)
+                    Buffer.BlockCopy(payload, 0, frameWithoutCRC, offset, payloadLen);
+                
+                ushort crc = CRC16.Calc(frameWithoutCRC);
+                sendData = new byte[frameLen + 2];
+                Buffer.BlockCopy(frameWithoutCRC, 0, sendData, 0, frameLen);
+                sendData[frameLen] = (byte)(crc & 0xFF);
+                sendData[frameLen + 1] = (byte)(crc >> 8);
+                
+                // 创建应答等待（使用新序列号）
+                var tcs = new TaskCompletionSource<AckFrame>(TaskCreationOptions.RunContinuationsAsynchronously);
+                if (!_pendingAcks.TryAdd(seq, tcs))
+                    throw new Exception($"序列号冲突: {seq}");
+                
+                try
+                {
+                    lock (_sendLock)
+                    {
+                        _stream.Write(sendData, 0, sendData.Length);
+                        _stream.Flush();
+                    }
+                    
+                    using var cts = new CancellationTokenSource(_timeoutMs);
+                    var ack = await tcs.Task.WaitAsync(cts.Token);
+                    
+                    if (ack.Status != AckFrame.ACK_OK)
+                        throw new RobotNACKException(ack.Status, seq);
+                    
+                    return ack;
+                }
+                catch (TimeoutException)
+                {
+                    _pendingAcks.TryRemove(seq, out _);
+                    if (retry == _maxRetries - 1)
+                        throw new TimeoutException($"指令0x{cmd:X2}/{subcmd:X2}应答超时（序列{seq}）");
+                    Console.WriteLine($"[RobotClient] 指令超时，重试 {retry + 1}/{_maxRetries}");
+                }
+                catch (RobotNACKException)
+                {
+                    _pendingAcks.TryRemove(seq, out _);
+                    throw;
+                }
+                catch (Exception)
+                {
+                    _pendingAcks.TryRemove(seq, out _);
+                    if (retry == _maxRetries - 1) throw;
+                }
             }
-            finally
-            {
-                _pendingAcks.TryRemove(seq, out _);
-            }
+            
+            throw new TimeoutException("达到最大重试次数");
         }
 
         #endregion
 
         #region 接收循环
         
-        /// <summary>接收循环（后台运行）</summary>
         private async Task ReceiveLoop(CancellationToken ct)
         {
             while (!ct.IsCancellationRequested && _stream != null)
@@ -291,9 +248,13 @@ namespace RobotLinkSDK
                             _recvLength -= _recvOffset;
                             _recvOffset = 0;
                         }
-                        
-                        if (_recvLength == _recvBuffer.Length)
+                        else if (_recvLength == _recvBuffer.Length)
+                        {
+                            // 缓冲区满但数据不足7字节，数据损坏，丢弃全部
+                            Console.WriteLine("[RobotClient] 接收缓冲区溢出，丢弃数据");
+                            _recvLength = 0;
                             _recvOffset = 0;
+                        }
                     }
                     
                     int bytesRead = await _stream.ReadAsync(_recvBuffer, _recvLength, _recvBuffer.Length - _recvLength, ct);
@@ -325,7 +286,6 @@ namespace RobotLinkSDK
             OnConnectionChanged?.Invoke(this, false);
         }
         
-        /// <summary>处理接收缓冲区中的数据</summary>
         private void ProcessReceiveBuffer()
         {
             int offset = _recvOffset;
@@ -334,8 +294,7 @@ namespace RobotLinkSDK
             {
                 if (_recvBuffer[offset] == 0xAA && _recvBuffer[offset + 1] == 0x55)
                 {
-                    int frameLen = _recvLength - offset;
-                    var ack = TryDecodeAck(_recvBuffer, offset, frameLen);
+                    var ack = TryDecodeAck(_recvBuffer, offset, _recvLength - offset);
                     if (ack != null)
                     {
                         if (_pendingAcks.TryRemove(ack.Sequence, out var tcs))
@@ -351,12 +310,11 @@ namespace RobotLinkSDK
             _recvOffset = offset;
         }
         
-        /// <summary>尝试解码应答帧（7字节最小帧：Header+Seq+Status+CRC）</summary>
         private AckFrame? TryDecodeAck(byte[] buffer, int offset, int available)
         {
             if (available < 7) return null;
             
-            ushort seq = (ushort)((buffer[offset + 2]) | (buffer[offset + 3] << 8));
+            uint seq = (uint)((buffer[offset + 2]) | (buffer[offset + 3] << 8));
             byte status = buffer[offset + 4];
             ushort recvCRC = (ushort)((buffer[offset + 5]) | (buffer[offset + 6] << 8));
             ushort calcCRC = CRC16.Calc(buffer, offset, 5);
@@ -371,7 +329,6 @@ namespace RobotLinkSDK
 
         #region 心跳循环
         
-        /// <summary>心跳循环（后台运行）</summary>
         private async Task HeartbeatLoop(CancellationToken ct)
         {
             while (!ct.IsCancellationRequested)
@@ -383,7 +340,6 @@ namespace RobotLinkSDK
                     if (!IsConnected) break;
                     
                     await HeartbeatAsync();
-                    // 心跳成功，重置失败计数
                     Interlocked.Exchange(ref _consecutiveHeartbeatFailures, 0);
                 }
                 catch (OperationCanceledException)
@@ -396,20 +352,29 @@ namespace RobotLinkSDK
                     Console.WriteLine($"[RobotClient] 心跳失败: {ex.Message} ({failures}/{MAX_HEARTBEAT_FAILURES})");
                     
                     if (failures >= MAX_HEARTBEAT_FAILURES)
-                    {
-                        Console.WriteLine("[RobotClient] 心跳丢失次数过多，触发重连");
                         _ = ReconnectAsync();
-                    }
                 }
             }
         }
         
-        /// <summary>重新连接</summary>
         private async Task ReconnectAsync()
         {
-            CleanupConnection();
-            await Task.Delay(1000);
-            await ConnectAsync(_ip, _port);
+            lock (_reconnectLock)
+            {
+                if (_isReconnecting) return;
+                _isReconnecting = true;
+            }
+            
+            try
+            {
+                CleanupConnection();
+                await Task.Delay(1000);
+                await ConnectAsync(_ip, _port);
+            }
+            finally
+            {
+                lock (_reconnectLock) { _isReconnecting = false; }
+            }
         }
 
         #endregion
@@ -419,8 +384,7 @@ namespace RobotLinkSDK
         public async Task SetSpeedAsync(float speed)
         {
             speed = Math.Clamp(speed, 0f, 0.5f);
-            byte[] payload = BitConverter.GetBytes(speed);
-            await SendCommandAsync(CMD.Motion, SubCMD_Motion.SetSpeed, payload);
+            await SendCommandAsync(CMD.Motion, SubCMD_Motion.SetSpeed, BitConverter.GetBytes(speed));
         }
         
         public async Task MoveForwardAsync() => await SendCommandAsync(CMD.Motion, SubCMD_Motion.Forward);
@@ -477,14 +441,12 @@ namespace RobotLinkSDK
         #region 系统控制API
         
         public async Task RequestSelfTestAsync() => await SendCommandAsync(CMD.System, SubCMD_System.SelfTest);
-        
         public async Task CalibrateSensorsAsync(byte type) => await SendCommandAsync(CMD.System, SubCMD_System.Calibrate, new byte[] { type });
         
         public async Task SyncTimeAsync()
         {
             long timestamp = DateTimeOffset.Now.ToUnixTimeMilliseconds();
-            byte[] payload = BitConverter.GetBytes(timestamp);
-            await SendCommandAsync(CMD.System, SubCMD_System.SyncTime, payload);
+            await SendCommandAsync(CMD.System, SubCMD_System.SyncTime, BitConverter.GetBytes(timestamp));
         }
         
         public async Task RequestSystemStatusAsync() => await SendCommandAsync(CMD.System, SubCMD_System.RequestStatus);
@@ -494,8 +456,7 @@ namespace RobotLinkSDK
         public async Task HeartbeatAsync()
         {
             uint clientTime = (uint)Environment.TickCount;
-            byte[] payload = BitConverter.GetBytes(clientTime);
-            await SendCommandAsync(CMD.Heartbeat, SubCMD_Heartbeat.Beat, payload);
+            await SendCommandAsync(CMD.Heartbeat, SubCMD_Heartbeat.Beat, BitConverter.GetBytes(clientTime));
         }
 
         #endregion
@@ -528,13 +489,12 @@ namespace RobotLinkSDK
         #endregion
     }
 
-    /// <summary>机器人NACK异常</summary>
     public class RobotNACKException : Exception
     {
         public byte Status { get; }
-        public ushort Sequence { get; }
+        public uint Sequence { get; }  // 改为uint
         
-        public RobotNACKException(byte status, ushort sequence) 
+        public RobotNACKException(byte status, uint sequence) 
             : base($"收到NACK: Status=0x{status:X2}, Seq={sequence}")
         {
             Status = status;

@@ -1,26 +1,39 @@
 using System;
-using System.Net.Sockets;
+using System.IO;
+using System.IO.Ports;
 using System.Threading;
 using System.Threading.Tasks;
 
 namespace RobotLinkSDK
 {
+    /// <summary>
+    /// 传感器接收器 - RS-485 Modbus RTU 轮询
+    /// 
+    /// 总线参数：9600-115200bps, 半双工, 主从模式
+    /// 支持：IMU、测距传感器、BMS等Modbus从机设备
+    /// </summary>
     public class SensorReceiver : IDisposable
     {
         #region 私有字段
         
-        private UdpClient? _udpClient;
+        private SerialPort? _serialPort;
         private CancellationTokenSource? _cts;
-        private Task? _recvTask;
+        private Task? _pollTask;
         private readonly object _lock = new();
         private bool _isRunning = false;
         
+        // Modbus从机地址
+        private const byte ADDR_IMU = 0x01;
+        private const byte ADDR_RANGING = 0x02;
+        private const byte ADDR_BMS = 0x03;
+        
+        // 轮询间隔
+        private int _pollIntervalMs = 50;  // 20Hz轮询频率
+        
+        // 最新数据
         private IMUData? _latestIMU;
         private RangingData? _latestRanging;
-        private OdometryData? _latestOdometry;
         private BMSData? _latestBMS;
-        
-        private readonly int _port;
         
         #endregion
 
@@ -28,29 +41,31 @@ namespace RobotLinkSDK
         
         public event EventHandler<IMUData>? OnIMU;
         public event EventHandler<RangingData>? OnRanging;
-        public event EventHandler<OdometryData>? OnOdometry;
         public event EventHandler<BMSData>? OnBMS;
-        public event EventHandler<byte[]>? OnLidar;
-        public event EventHandler<SystemStatusData>? OnSystemStatus;
         
         #endregion
 
         #region 属性
         
-        public IMUData? LatestIMU { get; private set; }
-        public RangingData? LatestRanging { get; private set; }
-        public OdometryData? LatestOdometry { get; private set; }
-        public BMSData? LatestBMS { get; private set; }
+        public IMUData? LatestIMU => _latestIMU;
+        public RangingData? LatestRanging => _latestRanging;
+        public BMSData? LatestBMS => _latestBMS;
         
         #endregion
 
         #region 构造与销毁
         
-        public SensorReceiver(int port = 5002) { _port = port; }
+        public SensorReceiver(string portName = "COM1", int baudRate = 115200)
+        {
+            _serialPort = new SerialPort(portName, baudRate, Parity.None, 8, StopBits.One);
+            _serialPort.ReadTimeout = 500;
+            _serialPort.WriteTimeout = 500;
+        }
 
         public void Dispose()
         {
             Stop();
+            _serialPort?.Dispose();
             GC.SuppressFinalize(this);
         }
 
@@ -66,17 +81,18 @@ namespace RobotLinkSDK
             {
                 if (_isRunning) return;
                 
-                if (_udpClient != null)
-                    Stop();  // 先停止旧的
+                if (_serialPort == null)
+                    throw new InvalidOperationException("串口未初始化");
                 
-                _udpClient = new UdpClient(_port);
-                _udpClient.Client.ReceiveTimeout = 5000;
+                if (!_serialPort.IsOpen)
+                    _serialPort.Open();
+                
                 _cts = new CancellationTokenSource();
                 _isRunning = true;
-                _recvTask = Task.Run(() => ReceiveLoop(_cts.Token));
+                _pollTask = Task.Run(() => PollLoop(_cts.Token));
             }
             
-            Console.WriteLine($"[SensorReceiver] 启动，监听UDP {_port}");
+            Console.WriteLine($"[SensorReceiver] 启动，轮询间隔 {_pollIntervalMs}ms");
         }
         
         public void Stop()
@@ -85,27 +101,39 @@ namespace RobotLinkSDK
             {
                 _isRunning = false;
                 try { _cts?.Cancel(); } catch { }
-                try { _udpClient?.Close(); } catch { }
-                _udpClient = null;
+                try { _serialPort?.Close(); } catch { }
                 _cts = null;
-                _recvTask = null;
+                _pollTask = null;
             }
             
             Console.WriteLine("[SensorReceiver] 已停止");
         }
+        
+        public void SetPollInterval(int ms)
+        {
+            _pollIntervalMs = Math.Clamp(ms, 10, 1000);
+        }
 
         #endregion
 
-        #region 接收循环
+        #region 轮询循环
         
-        private async Task ReceiveLoop(CancellationToken ct)
+        private async Task PollLoop(CancellationToken ct)
         {
-            while (!ct.IsCancellationRequested && _udpClient != null)
+            while (!ct.IsCancellationRequested)
             {
                 try
                 {
-                    var result = await _udpClient.ReceiveAsync(ct);
-                    ProcessUDPPacket(result.Buffer, result.Buffer.Length);
+                    // 轮询IMU
+                    await PollIMUAsync();
+                    
+                    // 轮询问距
+                    await PollRangingAsync();
+                    
+                    // 轮询BMS
+                    await PollBMSAsync();
+                    
+                    await Task.Delay(_pollIntervalMs, ct);
                 }
                 catch (OperationCanceledException)
                 {
@@ -115,167 +143,216 @@ namespace RobotLinkSDK
                 {
                     if (!ct.IsCancellationRequested)
                     {
-                        Console.WriteLine($"[SensorReceiver] 接收异常: {ex.Message}");
+                        Console.WriteLine($"[SensorReceiver] 轮询异常: {ex.Message}");
                         await Task.Delay(100, ct);
                     }
                 }
             }
         }
         
-        private void ProcessUDPPacket(byte[] data, int length)
+        private async Task PollIMUAsync()
         {
-            // 最小帧: Header(1)+TS(4)+Seq(2)+Type(1)+CRC(4) = 12字节
-            if (length < 12) return;
+            if (_serialPort == null || !_serialPort.IsOpen) return;
             
-            // CRC32校验（最后4字节）
-            uint recvCRC = ReadUInt32(data, length - 4);
-            uint calcCRC = CRC32.Calc(data, 0, length - 4);
-            if (recvCRC != calcCRC)
+            try
             {
-                Console.WriteLine($"[SensorReceiver] CRC校验失败，丢弃数据包");
-                return;
+                // 读保持寄存器 (功能码0x03)
+                // 地址 0x0000-0x0005: Roll, Pitch, Yaw, Wx, Wy, Wz (float各2寄存器)
+                byte[] request = ModbusRTU.BuildReadHoldingRegisters(ADDR_IMU, 0x0000, 12);
+                
+                lock (_lock)
+                {
+                    _serialPort.Write(request, 0, request.Length);
+                }
+                
+                await Task.Delay(5);  // 等待响应
+                
+                int bytesToRead = _serialPort.BytesToRead;
+                if (bytesToRead >= 31)  // 响应: ADDR(1)+FUNC(1)+LEN(1)+12字节数据+CRC(2)
+                {
+                    byte[] response = new byte[bytesToRead];
+                    _serialPort.Read(response, 0, bytesToRead);
+                    
+                    if (ModbusRTU.CheckCRC(response))
+                    {
+                        _latestIMU = new IMUData
+                        {
+                            Roll = ModbusRTU.ReadFloat(response, 3, 0),
+                            Pitch = ModbusRTU.ReadFloat(response, 3, 4),
+                            Yaw = ModbusRTU.ReadFloat(response, 3, 8),
+                            Wx = ModbusRTU.ReadFloat(response, 3, 12),
+                            Wy = ModbusRTU.ReadFloat(response, 3, 16),
+                            Wz = ModbusRTU.ReadFloat(response, 3, 20),
+                            Ax = 0, Ay = 0, Az = 0,
+                            Timestamp = DateTime.Now
+                        };
+                        OnIMU?.Invoke(this, _latestIMU);
+                    }
+                }
             }
+            catch { }
+        }
+        
+        private async Task PollRangingAsync()
+        {
+            if (_serialPort == null || !_serialPort.IsOpen) return;
             
-            int offset = 0;
-            
-            // 帧头
-            if (data[offset++] != 0xAA) return;
-            
-            // 时间戳
-            uint timestamp = ReadUInt32(data, offset);
-            offset += 4;
-            
-            // 序列号（跳过）
-            offset += 2;
-            
-            // 传感器类型
-            byte sensorType = data[offset++];
-            
-            // 载荷长度（总长度 - 12字节头 - 4字节CRC）
-            int payloadLen = length - offset - 4;
-            if (payloadLen < 0) return;
-            
-            switch (sensorType)
+            try
             {
-                case 0x01: ParseIMU(data, offset, payloadLen, timestamp); break;
-                case 0x02: ParseRanging(data, offset, payloadLen, timestamp); break;
-                case 0x03: ParseOdometry(data, offset, payloadLen, timestamp); break;
-                case 0x04: ParseBMS(data, offset, payloadLen, timestamp); break;
-                case 0x05: ParseLidar(data, offset, payloadLen); break;
-                case 0x06: ParseSystemStatus(data, offset, payloadLen, timestamp); break;
+                byte[] request = ModbusRTU.BuildReadHoldingRegisters(ADDR_RANGING, 0x0000, 4);
+                
+                lock (_lock)
+                {
+                    _serialPort.Write(request, 0, request.Length);
+                }
+                
+                await Task.Delay(5);
+                
+                int bytesToRead = _serialPort.BytesToRead;
+                if (bytesToRead >= 15)
+                {
+                    byte[] response = new byte[bytesToRead];
+                    _serialPort.Read(response, 0, bytesToRead);
+                    
+                    if (ModbusRTU.CheckCRC(response))
+                    {
+                        _latestRanging = new RangingData
+                        {
+                            Front = ModbusRTU.ReadFloat(response, 3, 0),
+                            Rear = ModbusRTU.ReadFloat(response, 3, 4),
+                            Timestamp = DateTime.Now
+                        };
+                        OnRanging?.Invoke(this, _latestRanging);
+                    }
+                }
             }
+            catch { }
         }
         
-        private void ParseIMU(byte[] data, int offset, int length, uint timestamp)
+        private async Task PollBMSAsync()
         {
-            if (length < 36) return;
+            if (_serialPort == null || !_serialPort.IsOpen) return;
             
-            LatestIMU = new IMUData
+            try
             {
-                Roll = ReadFloat(data, offset),
-                Pitch = ReadFloat(data, offset + 4),
-                Yaw = ReadFloat(data, offset + 8),
-                Wx = ReadFloat(data, offset + 12),
-                Wy = ReadFloat(data, offset + 16),
-                Wz = ReadFloat(data, offset + 20),
-                Ax = ReadFloat(data, offset + 24),
-                Ay = ReadFloat(data, offset + 28),
-                Az = ReadFloat(data, offset + 32),
-                Timestamp = DateTimeOffset.FromUnixTimeMilliseconds(timestamp).DateTime
-            };
-            OnIMU?.Invoke(this, LatestIMU);
+                byte[] request = ModbusRTU.BuildReadHoldingRegisters(ADDR_BMS, 0x0000, 10);
+                
+                lock (_lock)
+                {
+                    _serialPort.Write(request, 0, request.Length);
+                }
+                
+                await Task.Delay(5);
+                
+                int bytesToRead = _serialPort.BytesToRead;
+                if (bytesToRead >= 27)
+                {
+                    byte[] response = new byte[bytesToRead];
+                    _serialPort.Read(response, 0, bytesToRead);
+                    
+                    if (ModbusRTU.CheckCRC(response))
+                    {
+                        _latestBMS = new BMSData
+                        {
+                            Voltage = ModbusRTU.ReadFloat(response, 3, 0),
+                            Current = ModbusRTU.ReadFloat(response, 3, 4),
+                            SOC = response[11],
+                            TempMax = (sbyte)response[12],
+                            TempMin = (sbyte)response[13],
+                            CycleCount = (ushort)((response[14] << 8) | response[15]),
+                            Status = response[16],
+                            Timestamp = DateTime.Now
+                        };
+                        OnBMS?.Invoke(this, _latestBMS);
+                    }
+                }
+            }
+            catch { }
         }
-        
-        private void ParseRanging(byte[] data, int offset, int length, uint timestamp)
-        {
-            if (length < 8) return;
-            
-            LatestRanging = new RangingData
-            {
-                Front = ReadFloat(data, offset),
-                Rear = ReadFloat(data, offset + 4),
-                Timestamp = DateTimeOffset.FromUnixTimeMilliseconds(timestamp).DateTime
-            };
-            OnRanging?.Invoke(this, LatestRanging);
-        }
-        
-        private void ParseOdometry(byte[] data, int offset, int length, uint timestamp)
-        {
-            if (length < 8) return;
-            
-            LatestOdometry = new OdometryData
-            {
-                Distance = ReadFloat(data, offset),
-                Speed = ReadFloat(data, offset + 4),
-                Timestamp = DateTimeOffset.FromUnixTimeMilliseconds(timestamp).DateTime
-            };
-            OnOdometry?.Invoke(this, LatestOdometry);
-        }
-        
-        private void ParseBMS(byte[] data, int offset, int length, uint timestamp)
-        {
-            if (length < 14) return;
-            
-            LatestBMS = new BMSData
-            {
-                Voltage = ReadFloat(data, offset),
-                Current = ReadFloat(data, offset + 4),
-                SOC = data[offset + 8],
-                TempMax = (sbyte)data[offset + 9],
-                TempMin = (sbyte)data[offset + 10],
-                CycleCount = (ushort)((data[offset + 11] << 8) | data[offset + 12]),
-                Status = data[offset + 13],
-                Timestamp = DateTimeOffset.FromUnixTimeMilliseconds(timestamp).DateTime
-            };
-            OnBMS?.Invoke(this, LatestBMS);
-        }
-        
-        private void ParseLidar(byte[] data, int offset, int length)
-        {
-            if (length < 4) return;
-            
-            uint pointCount = ReadUInt32(data, offset);
-            byte[] pointCloud = new byte[length - 4];
-            Array.Copy(data, offset + 4, pointCloud, 0, pointCloud.Length);
-            OnLidar?.Invoke(this, pointCloud);
-        }
-        
-        private void ParseSystemStatus(byte[] data, int offset, int length, uint timestamp)
-        {
-            if (length < 11) return;
-            
-            var status = new SystemStatusData
-            {
-                Mode = (RunMode)data[offset],
-                ErrorCode = (ErrorCode)data[offset + 1],
-                CpuTemp = (short)((data[offset + 2] << 8) | data[offset + 3]),
-                MemoryUsage = (ushort)((data[offset + 4] << 8) | data[offset + 5]),
-                BoardTemp = (short)((data[offset + 6] << 8) | data[offset + 7]),
-                WifiRSSI = data[offset + 8],
-                WifiQuality = data[offset + 9],
-                UptimeSeconds = ReadUInt32(data, offset + 10),
-                Timestamp = DateTimeOffset.FromUnixTimeMilliseconds(timestamp).DateTime
-            };
-            OnSystemStatus?.Invoke(this, status);
-        }
-        
-        #endregion
 
-        #region 辅助方法
-        
-        private static float ReadFloat(byte[] data, int offset)
+        #endregion
+    }
+    
+    /// <summary>
+    /// Modbus RTU 工具类
+    /// </summary>
+    public static class ModbusRTU
+    {
+        /// <summary>读保持寄存器 (功能码0x03)</summary>
+        public static byte[] BuildReadHoldingRegisters(byte addr, ushort startAddr, ushort count)
         {
-            uint bits = (uint)data[offset] | ((uint)data[offset + 1] << 8) 
-                     | ((uint)data[offset + 2] << 16) | ((uint)data[offset + 3] << 24);
+            byte[] frame = new byte[8];
+            frame[0] = addr;
+            frame[1] = 0x03;  // 功能码：读保持寄存器
+            frame[2] = (byte)(startAddr >> 8);
+            frame[3] = (byte)(startAddr & 0xFF);
+            frame[4] = (byte)(count >> 8);
+            frame[5] = (byte)(count & 0xFF);
+            
+            ushort crc = CRC16Modbus.Calc(frame, 0, 6);
+            frame[6] = (byte)(crc & 0xFF);
+            frame[7] = (byte)(crc >> 8);
+            
+            return frame;
+        }
+        
+        /// <summary>CRC校验</summary>
+        public static bool CheckCRC(byte[] frame)
+        {
+            if (frame.Length < 3) return false;
+            
+            ushort recvCRC = (ushort)((frame[frame.Length - 1] << 8) | frame[frame.Length - 2]);
+            ushort calcCRC = CRC16Modbus.Calc(frame, 0, frame.Length - 2);
+            
+            return recvCRC == calcCRC;
+        }
+        
+        /// <summary>读取float (big-endian)</summary>
+        public static float ReadFloat(byte[] frame, int dataOffset, int index)
+        {
+            int offset = dataOffset + index;
+            if (offset + 4 > frame.Length) return 0;
+            
+            uint bits = (uint)(frame[offset] << 24) | ((uint)frame[offset + 1] << 16) 
+                     | ((uint)frame[offset + 2] << 8) | frame[offset + 3];
             return BitConverter.ToSingle(BitConverter.GetBytes(bits), 0);
         }
+    }
+    
+    /// <summary>
+    /// CRC16-Modbus 校验
+    /// </summary>
+    public static class CRC16Modbus
+    {
+        private static readonly ushort[] Table = new ushort[256];
         
-        private static uint ReadUInt32(byte[] data, int offset)
+        static CRC16Modbus()
         {
-            return (uint)data[offset] | ((uint)data[offset + 1] << 8) 
-                 | ((uint)data[offset + 2] << 16) | ((uint)data[offset + 3] << 24);
+            const ushort poly = 0x8005;
+            for (int i = 0; i < 256; i++)
+            {
+                ushort value = 0;
+                ushort temp = (ushort)(i << 8);
+                for (int j = 0; j < 8; j++)
+                {
+                    if (((value ^ temp) & 0x8000) != 0)
+                        value = (ushort)((value << 1) ^ poly);
+                    else
+                        value = (ushort)(value << 1);
+                    temp = (ushort)(temp << 1);
+                }
+                Table[i] = value;
+            }
         }
         
-        #endregion
+        public static ushort Calc(byte[] data, int offset, int length)
+        {
+            ushort crc = 0xFFFF;
+            for (int i = offset; i < offset + length; i++)
+            {
+                crc = (ushort)((crc << 8) ^ Table[((crc >> 8) ^ data[i]) & 0xFF]);
+            }
+            return crc;
+        }
     }
 }

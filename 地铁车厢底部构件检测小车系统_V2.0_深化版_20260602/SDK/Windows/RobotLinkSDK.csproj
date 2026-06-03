@@ -1,13 +1,20 @@
 <Project Sdk="Microsoft.NET.Sdk">
+
   <PropertyGroup>
-    <OutputType>Library</OutputType>
-    <TargetFramework>net6.0-windows</TargetFramework>
-    <ImplicitUsings>using System;</ImplicitUsings>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <RootNamespace>RobotLinkSDK</RootNamespace>
-    <Version>1.0.0</Version>
     <AssemblyName>RobotLinkSDK</AssemblyName>
-    <Description>地铁车厢底部检测机器人控制SDK</Description>
+    <Version>2.0.0</Version>
+    <Authors>济南华升信息科技有限公司</Authors>
+    <Company>济南华升信息科技有限公司</Company>
+    <Product>列车底部构件检测机器人控制SDK</Product>
+    <Description>RobotLinkSDK - 列车底部构件检测机器人C#控制端SDK</Description>
   </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.IO.Ports" Version="8.0.0" />
+  </ItemGroup>
+
 </Project>

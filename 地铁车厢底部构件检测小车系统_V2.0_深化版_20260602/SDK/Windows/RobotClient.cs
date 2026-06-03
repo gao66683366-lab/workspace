@@ -6,25 +6,36 @@ using System.Threading.Tasks;
 
 namespace RobotLinkSDK
 {
+    /// <summary>
+    /// 机器人控制客户端
+    /// 
+    /// 协议：STX(0x02) + CMD(1B) + LEN(2B, LE) + Payload(N) + CRC16(2B) + ETX(0x03)
+    /// 端口：8001 (TCP命令), 8002 (TCP遥测)
+    /// </summary>
     public class RobotClient : IDisposable
     {
         #region 私有字段
         
-        private TcpClient? _tcpClient;
-        private NetworkStream? _stream;
+        private TcpClient? _tcpCommand;
+        private TcpClient? _tcpTelemetry;
+        private NetworkStream? _commandStream;
+        private NetworkStream? _telemetryStream;
         private readonly object _sendLock = new();
         private readonly object _reconnectLock = new();
         private readonly ConcurrentDictionary<uint, TaskCompletionSource<AckFrame>> _pendingAcks = new();
         private CancellationTokenSource? _recvCts;
         private CancellationTokenSource? _heartbeatCts;
+        private CancellationTokenSource? _telemetryCts;
         private Task? _recvTask;
         private Task? _heartbeatTask;
-        private uint _nextSequence = 1;  // 改为uint，避免溢出
+        private Task? _telemetryTask;
+        private uint _nextSequence = 1;
         private bool _disposed = false;
         private bool _isReconnecting = false;
         
         private string _ip = "";
-        private int _port = 5000;
+        private int _commandPort = 8001;
+        private int _telemetryPort = 8002;
         private int _timeoutMs = 500;
         private int _maxRetries = 3;
         private int _heartbeatIntervalMs = 2000;
@@ -45,12 +56,13 @@ namespace RobotLinkSDK
         public event EventHandler<SystemStatusData>? OnSystemStatus;
         public event EventHandler<AlarmEventArgs>? OnAlarm;
         public event EventHandler<SelfTestResult>? OnSelfTestResult;
+        public event EventHandler<TelemetryData>? OnTelemetry;
         
         #endregion
 
         #region 属性
         
-        public bool IsConnected => _isConnected && _tcpClient?.Connected == true;
+        public bool IsConnected => _isConnected && _tcpCommand?.Connected == true;
         public string ConnectedIP => _ip;
         public int Latency { get; private set; } = 0;
         
@@ -59,7 +71,12 @@ namespace RobotLinkSDK
         #region 构造与销毁
         
         public RobotClient() { }
-        public RobotClient(string ip, int port = 5000) { _ip = ip; _port = port; }
+        public RobotClient(string ip, int commandPort = 8001, int telemetryPort = 8002) 
+        { 
+            _ip = ip; 
+            _commandPort = commandPort; 
+            _telemetryPort = telemetryPort; 
+        }
 
         public void Dispose()
         {
@@ -75,27 +92,36 @@ namespace RobotLinkSDK
 
         #region 连接管理
         
-        public async Task<bool> ConnectAsync(string ip, int port = 5000)
+        public async Task<bool> ConnectAsync(string ip, int commandPort = 8001, int telemetryPort = 8002)
         {
             if (_disposed) throw new ObjectDisposedException(nameof(RobotClient));
             
             _ip = ip;
-            _port = port;
+            _commandPort = commandPort;
+            _telemetryPort = telemetryPort;
             
             try
             {
-                _tcpClient = new TcpClient { NoDelay = true };
-                _tcpClient.Client.NoDelay = true;
-                
+                // 连接命令通道
+                _tcpCommand = new TcpClient { NoDelay = true };
+                _tcpCommand.Client.NoDelay = true;
                 using var cts = new CancellationTokenSource(5000);
-                await _tcpClient.ConnectAsync(ip, port, cts.Token);
+                await _tcpCommand.ConnectAsync(ip, commandPort, cts.Token);
+                _commandStream = _tcpCommand.GetStream();
+                _commandStream.ReadTimeout = Timeout.Infinite;
+                _commandStream.WriteTimeout = Timeout.Infinite;
                 
-                _stream = _tcpClient.GetStream();
-                _stream.ReadTimeout = Timeout.Infinite;  // 依赖CTS控制，不用Stream超时
-                _stream.WriteTimeout = Timeout.Infinite;
+                // 连接遥测通道
+                _tcpTelemetry = new TcpClient { NoDelay = true };
+                using var cts2 = new CancellationTokenSource(5000);
+                await _tcpTelemetry.ConnectAsync(ip, telemetryPort, cts2.Token);
+                _telemetryStream = _tcpTelemetry.GetStream();
                 
                 _recvCts = new CancellationTokenSource();
                 _recvTask = Task.Run(() => ReceiveLoop(_recvCts.Token), _recvCts.Token);
+                
+                _telemetryCts = new CancellationTokenSource();
+                _telemetryTask = Task.Run(() => TelemetryLoop(_telemetryCts.Token), _telemetryCts.Token);
                 
                 _heartbeatCts = new CancellationTokenSource();
                 _heartbeatTask = Task.Run(() => HeartbeatLoop(_heartbeatCts.Token), _heartbeatCts.Token);
@@ -104,7 +130,8 @@ namespace RobotLinkSDK
                 _consecutiveHeartbeatFailures = 0;
                 OnConnectionChanged?.Invoke(this, true);
                 
-                await RequestSystemStatusAsync();
+                // 同步获取一次系统状态
+                await RequestStatusAsync();
                 return true;
             }
             catch (Exception ex)
@@ -123,13 +150,19 @@ namespace RobotLinkSDK
             
             try { _heartbeatCts?.Cancel(); } catch { }
             try { _recvCts?.Cancel(); } catch { }
-            try { _stream?.Close(); } catch { }
-            try { _tcpClient?.Close(); } catch { }
+            try { _telemetryCts?.Cancel(); } catch { }
+            try { _commandStream?.Close(); } catch { }
+            try { _telemetryStream?.Close(); } catch { }
+            try { _tcpCommand?.Close(); } catch { }
+            try { _tcpTelemetry?.Close(); } catch { }
             
-            _stream = null;
-            _tcpClient = null;
+            _commandStream = null;
+            _telemetryStream = null;
+            _tcpCommand = null;
+            _tcpTelemetry = null;
             _recvCts = null;
             _heartbeatCts = null;
+            _telemetryCts = null;
             _recvOffset = 0;
             _recvLength = 0;
             
@@ -144,9 +177,9 @@ namespace RobotLinkSDK
 
         #region 核心发送逻辑
         
-        private async Task<AckFrame> SendCommandAsync(byte cmd, byte subcmd, byte[]? payload = null)
+        private async Task<AckFrame> SendCommandAsync(byte cmd, byte[]? payload = null)
         {
-            if (!IsConnected || _stream == null)
+            if (!IsConnected || _commandStream == null)
                 throw new InvalidOperationException("未连接到机器人");
             
             int payloadLen = payload?.Length ?? 0;
@@ -154,38 +187,14 @@ namespace RobotLinkSDK
             for (int retry = 0; retry < _maxRetries; retry++)
             {
                 uint seq;
-                byte[] sendData;
+                byte[] frame;
                 
-                // 每次重试都用新序列号（修复：重发时序列号必须更新）
                 lock (_sendLock)
                 {
                     seq = _nextSequence++;
+                    frame = Protocol.BuildFrame(cmd, payload);
                 }
                 
-                // 构建帧
-                int frameLen = 2 + 2 + 2 + 1 + 1 + payloadLen; // Header+Seq+Len+CMD+SubCMD+Payload
-                byte[] frameWithoutCRC = new byte[frameLen];
-                int offset = 0;
-                
-                frameWithoutCRC[offset++] = 0xAA;
-                frameWithoutCRC[offset++] = 0x55;
-                frameWithoutCRC[offset++] = (byte)(seq & 0xFF);
-                frameWithoutCRC[offset++] = (byte)(seq >> 8);
-                ushort length = (ushort)(2 + payloadLen);
-                frameWithoutCRC[offset++] = (byte)(length & 0xFF);
-                frameWithoutCRC[offset++] = (byte)(length >> 8);
-                frameWithoutCRC[offset++] = cmd;
-                frameWithoutCRC[offset++] = subcmd;
-                if (payload != null && payload.Length > 0)
-                    Buffer.BlockCopy(payload, 0, frameWithoutCRC, offset, payloadLen);
-                
-                ushort crc = CRC16.Calc(frameWithoutCRC);
-                sendData = new byte[frameLen + 2];
-                Buffer.BlockCopy(frameWithoutCRC, 0, sendData, 0, frameLen);
-                sendData[frameLen] = (byte)(crc & 0xFF);
-                sendData[frameLen + 1] = (byte)(crc >> 8);
-                
-                // 创建应答等待（使用新序列号）
                 var tcs = new TaskCompletionSource<AckFrame>(TaskCreationOptions.RunContinuationsAsynchronously);
                 if (!_pendingAcks.TryAdd(seq, tcs))
                     throw new Exception($"序列号冲突: {seq}");
@@ -194,14 +203,14 @@ namespace RobotLinkSDK
                 {
                     lock (_sendLock)
                     {
-                        _stream.Write(sendData, 0, sendData.Length);
-                        _stream.Flush();
+                        _commandStream.Write(frame, 0, frame.Length);
+                        _commandStream.Flush();
                     }
                     
                     using var cts = new CancellationTokenSource(_timeoutMs);
                     var ack = await tcs.Task.WaitAsync(cts.Token);
                     
-                    if (ack.Status != AckFrame.ACK_OK)
+                    if (ack.Status != Protocol.STATUS_OK)
                         throw new RobotNACKException(ack.Status, seq);
                     
                     return ack;
@@ -210,7 +219,7 @@ namespace RobotLinkSDK
                 {
                     _pendingAcks.TryRemove(seq, out _);
                     if (retry == _maxRetries - 1)
-                        throw new TimeoutException($"指令0x{cmd:X2}/{subcmd:X2}应答超时（序列{seq}）");
+                        throw new TimeoutException($"指令0x{cmd:X2}应答超时（序列{seq}）");
                     Console.WriteLine($"[RobotClient] 指令超时，重试 {retry + 1}/{_maxRetries}");
                 }
                 catch (RobotNACKException)
@@ -234,7 +243,7 @@ namespace RobotLinkSDK
         
         private async Task ReceiveLoop(CancellationToken ct)
         {
-            while (!ct.IsCancellationRequested && _stream != null)
+            while (!ct.IsCancellationRequested && _commandStream != null)
             {
                 try
                 {
@@ -250,14 +259,14 @@ namespace RobotLinkSDK
                         }
                         else if (_recvLength == _recvBuffer.Length)
                         {
-                            // 缓冲区满但数据不足7字节，数据损坏，丢弃全部
                             Console.WriteLine("[RobotClient] 接收缓冲区溢出，丢弃数据");
                             _recvLength = 0;
                             _recvOffset = 0;
                         }
                     }
                     
-                    int bytesRead = await _stream.ReadAsync(_recvBuffer, _recvLength, _recvBuffer.Length - _recvLength, ct);
+                    int bytesRead = await _commandStream.ReadAsync(_recvBuffer, _recvLength, 
+                        _recvBuffer.Length - _recvLength, ct);
                     
                     if (bytesRead == 0)
                     {
@@ -292,7 +301,7 @@ namespace RobotLinkSDK
             
             while (offset + 7 <= _recvLength)
             {
-                if (_recvBuffer[offset] == 0xAA && _recvBuffer[offset + 1] == 0x55)
+                if (_recvBuffer[offset] == Protocol.STX)
                 {
                     var ack = TryDecodeAck(_recvBuffer, offset, _recvLength - offset);
                     if (ack != null)
@@ -300,7 +309,7 @@ namespace RobotLinkSDK
                         if (_pendingAcks.TryRemove(ack.Sequence, out var tcs))
                             tcs.TrySetResult(ack);
                         
-                        offset += 7;
+                        offset += ack.FrameLength;
                         continue;
                     }
                 }
@@ -312,19 +321,78 @@ namespace RobotLinkSDK
         
         private AckFrame? TryDecodeAck(byte[] buffer, int offset, int available)
         {
-            if (available < 7) return null;
+            // 最小帧: STX(1)+CMD(1)+STATUS(1)+LEN(2)+CRC16(2)+ETX(1) = 8字节
+            if (available < 8) return null;
             
-            uint seq = (uint)((buffer[offset + 2]) | (buffer[offset + 3] << 8));
-            byte status = buffer[offset + 4];
-            ushort recvCRC = (ushort)((buffer[offset + 5]) | (buffer[offset + 6] << 8));
-            ushort calcCRC = CRC16.Calc(buffer, offset, 5);
+            byte cmd = buffer[offset + 1];
+            byte status = buffer[offset + 2];
+            ushort payloadLen = (ushort)(buffer[offset + 3] | (buffer[offset + 4] << 8));
             
-            if (recvCRC == calcCRC)
-                return new AckFrame { Sequence = seq, Status = status };
+            int frameLen = 1 + 1 + 1 + 2 + payloadLen + 2 + 1;
+            if (offset + frameLen > _recvLength) return null;
             
-            return null;
+            ushort recvCRC = (ushort)(buffer[offset + 1 + 1 + 1 + 2 + payloadLen] 
+                                     | (buffer[offset + 1 + 1 + 1 + 2 + payloadLen + 1] << 8));
+            ushort calcCRC = CRC16.Calc(buffer, offset, 1 + 1 + 1 + 2 + payloadLen);
+            
+            if (recvCRC != calcCRC) return null;
+            
+            if (buffer[offset + frameLen - 1] != Protocol.ETX) return null;
+            
+            uint seq = (uint)(offset & 0xFFFFFFFF);  // 简化的序列号（用于匹配）
+            return new AckFrame { Sequence = seq, Status = status, FrameLength = frameLen };
         }
+        
+        #endregion
 
+        #region 遥测循环
+        
+        private async Task TelemetryLoop(CancellationToken ct)
+        {
+            byte[] telemetryBuffer = new byte[8192];
+            
+            while (!ct.IsCancellationRequested && _telemetryStream != null)
+            {
+                try
+                {
+                    int bytesRead = await _telemetryStream.ReadAsync(telemetryBuffer, 0, telemetryBuffer.Length, ct);
+                    if (bytesRead == 0) break;
+                    
+                    // 解析遥测数据
+                    ProcessTelemetry(telemetryBuffer, bytesRead);
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    if (!ct.IsCancellationRequested)
+                    {
+                        Console.WriteLine($"[RobotClient] 遥测异常: {ex.Message}");
+                        await Task.Delay(100, ct);
+                    }
+                }
+            }
+        }
+        
+        private void ProcessTelemetry(byte[] data, int length)
+        {
+            var telemetry = Protocol.ParseFrame(data, length, out byte cmd, out byte[]? payload);
+            if (telemetry == null) return;
+            
+            switch (cmd)
+            {
+                case Protocol.CMD_SYS_STATUS:
+                    if (payload != null && payload.Length >= 11)
+                        OnSystemStatus?.Invoke(this, new SystemStatusData(payload));
+                    break;
+                case Protocol.CMD_HEARTBEAT:
+                    // 心跳响应处理
+                    break;
+            }
+        }
+        
         #endregion
 
         #region 心跳循环
@@ -336,7 +404,6 @@ namespace RobotLinkSDK
                 try
                 {
                     await Task.Delay(_heartbeatIntervalMs, ct);
-                    
                     if (!IsConnected) break;
                     
                     await HeartbeatAsync();
@@ -369,7 +436,7 @@ namespace RobotLinkSDK
             {
                 CleanupConnection();
                 await Task.Delay(1000);
-                await ConnectAsync(_ip, _port);
+                await ConnectAsync(_ip, _commandPort, _telemetryPort);
             }
             finally
             {
@@ -384,19 +451,19 @@ namespace RobotLinkSDK
         public async Task SetSpeedAsync(float speed)
         {
             speed = Math.Clamp(speed, 0f, 0.5f);
-            await SendCommandAsync(CMD.Motion, SubCMD_Motion.SetSpeed, BitConverter.GetBytes(speed));
+            await SendCommandAsync(Protocol.CMD_MOTION_SPEED, BitConverter.GetBytes(speed));
         }
         
-        public async Task MoveForwardAsync() => await SendCommandAsync(CMD.Motion, SubCMD_Motion.Forward);
-        public async Task MoveBackwardAsync() => await SendCommandAsync(CMD.Motion, SubCMD_Motion.Backward);
-        public async Task MoveStopAsync() => await SendCommandAsync(CMD.Motion, SubCMD_Motion.Stop);
-        public async Task MoveEstopAsync() => await SendCommandAsync(CMD.Motion, SubCMD_Motion.EStop);
+        public async Task MoveAbsAsync(float distance) => await SendCommandAsync(Protocol.CMD_MOTION_ABS, BitConverter.GetBytes(distance));
+        public async Task MoveRelAsync(float distance) => await SendCommandAsync(Protocol.CMD_MOTION_REL, BitConverter.GetBytes(distance));
+        public async Task MoveStopAsync() => await SendCommandAsync(Protocol.CMD_MOTION_STOP);
+        public async Task MoveHomeAsync() => await SendCommandAsync(Protocol.CMD_MOTION_HOME);
 
         #endregion
 
         #region 云台控制API
         
-        public async Task PTZControlAsync(byte camera, short pan, short tilt)
+        public async Task PTZAngleAsync(byte camera, short pan, short tilt)
         {
             pan = (short)Math.Clamp(pan, (short)-180, (short)180);
             tilt = (short)Math.Clamp(tilt, (short)-90, (short)90);
@@ -408,83 +475,91 @@ namespace RobotLinkSDK
             payload[3] = (byte)(tilt & 0xFF);
             payload[4] = (byte)((tilt >> 8) & 0xFF);
             
-            await SendCommandAsync(CMD.PTZ, SubCMD_PTZ.AngleControl, payload);
+            await SendCommandAsync(Protocol.CMD_PTZ_ANGLE, payload);
         }
         
-        public async Task PTZResetAsync(byte camera) => await SendCommandAsync(CMD.PTZ, SubCMD_PTZ.Reset, new byte[] { camera });
-        public async Task PTZSavePresetAsync(byte camera, byte presetId) => await SendCommandAsync(CMD.PTZ, SubCMD_PTZ.SavePreset, new byte[] { camera, presetId });
-        public async Task PTZLoadPresetAsync(byte camera, byte presetId) => await SendCommandAsync(CMD.PTZ, SubCMD_PTZ.LoadPreset, new byte[] { camera, presetId });
+        public async Task PTZPresetAsync(byte camera, byte presetId) => await SendCommandAsync(Protocol.CMD_PTZ_PRESET, new byte[] { camera, presetId });
+        public async Task PTZResetAsync(byte camera) => await SendCommandAsync(Protocol.CMD_PTZ_RESET, new byte[] { camera });
+
+        #endregion
+
+        #region 相机控制API
+        
+        public async Task CameraZoomAsync(byte camera, ushort zoom) => await SendCommandAsync(Protocol.CMD_CAMERA_ZOOM, new byte[] { camera, (byte)(zoom & 0xFF), (byte)(zoom >> 8) });
+        public async Task CameraFocusAsync(byte camera, ushort focus) => await SendCommandAsync(Protocol.CMD_CAMERA_FOCUS, new byte[] { camera, (byte)(focus & 0xFF), (byte)(focus >> 8) });
+        public async Task CameraCaptureAsync(byte camera) => await SendCommandAsync(Protocol.CMD_CAMERA_CAPTURE, new byte[] { camera });
 
         #endregion
 
         #region 光源控制API
         
-        public async Task SetLightBrightnessAsync(byte brightness)
+        public async Task SetBrightnessAsync(byte brightness)
         {
             brightness = (byte)Math.Clamp(brightness, (byte)0, (byte)100);
-            await SendCommandAsync(CMD.Light, SubCMD_Light.SetBrightness, new byte[] { brightness });
+            await SendCommandAsync(Protocol.CMD_LIGHT_BRIGHTNESS, new byte[] { brightness });
         }
         
-        public async Task SetFrontLightAsync(bool onoff) => await SendCommandAsync(CMD.Light, SubCMD_Light.FrontLight, new byte[] { (byte)(onoff ? 1 : 0) });
-        public async Task SetRearLightAsync(bool onoff) => await SendCommandAsync(CMD.Light, SubCMD_Light.RearLight, new byte[] { (byte)(onoff ? 1 : 0) });
+        public async Task SetLightSwitchAsync(byte lightId, bool onoff) => await SendCommandAsync(Protocol.CMD_LIGHT_SWITCH, new byte[] { lightId, (byte)(onoff ? 1 : 0) });
 
         #endregion
 
-        #region 采集控制API
+        #region IO控制API
         
-        public async Task StartCaptureAsync(byte mode = 0) => await SendCommandAsync(CMD.Capture, SubCMD_Capture.Start, new byte[] { mode });
-        public async Task StopCaptureAsync() => await SendCommandAsync(CMD.Capture, SubCMD_Capture.Stop);
-        public async Task ForceSaveDataAsync() => await SendCommandAsync(CMD.Capture, SubCMD_Capture.SaveData);
+        public async Task SetDOAsync(byte index, bool value) => await SendCommandAsync(Protocol.CMD_IO_DO, new byte[] { index, (byte)(value ? 1 : 0) });
+        public async Task GetDIAsync() => await SendCommandAsync(Protocol.CMD_IO_DI);
+        public async Task SetPWMAsync(byte channel, byte dutyCycle) => await SendCommandAsync(Protocol.CMD_IO_PWM, new byte[] { channel, dutyCycle });
 
         #endregion
 
         #region 系统控制API
         
-        public async Task RequestSelfTestAsync() => await SendCommandAsync(CMD.System, SubCMD_System.SelfTest);
-        public async Task CalibrateSensorsAsync(byte type) => await SendCommandAsync(CMD.System, SubCMD_System.Calibrate, new byte[] { type });
-        
+        public async Task RequestStatusAsync() => await SendCommandAsync(Protocol.CMD_SYS_STATUS);
         public async Task SyncTimeAsync()
         {
             long timestamp = DateTimeOffset.Now.ToUnixTimeMilliseconds();
-            await SendCommandAsync(CMD.System, SubCMD_System.SyncTime, BitConverter.GetBytes(timestamp));
+            await SendCommandAsync(Protocol.CMD_SYS_TIME, BitConverter.GetBytes(timestamp));
         }
-        
-        public async Task RequestSystemStatusAsync() => await SendCommandAsync(CMD.System, SubCMD_System.RequestStatus);
-        public async Task EnterSleepAsync() => await SendCommandAsync(CMD.System, SubCMD_System.EnterSleep);
-        public async Task WakeUpAsync() => await SendCommandAsync(CMD.System, SubCMD_System.WakeUp);
+        public async Task SendConfigAsync(byte[] config) => await SendCommandAsync(Protocol.CMD_SYS_CONFIG, config);
         
         public async Task HeartbeatAsync()
         {
             uint clientTime = (uint)Environment.TickCount;
-            await SendCommandAsync(CMD.Heartbeat, SubCMD_Heartbeat.Beat, BitConverter.GetBytes(clientTime));
+            await SendCommandAsync(Protocol.CMD_HEARTBEAT, BitConverter.GetBytes(clientTime));
         }
+
+        #endregion
+
+        #region 升级API
+        
+        public async Task UpdateStartAsync(uint fileSize, uint crc32) => await SendCommandAsync(Protocol.CMD_UPDATE_START, BitConverter.GetBytes(fileSize).Concat(BitConverter.GetBytes(crc32)).ToArray());
+        public async Task UpdateDataAsync(byte[] data) => await SendCommandAsync(Protocol.CMD_UPDATE_DATA, data);
+        public async Task UpdateEndAsync() => await SendCommandAsync(Protocol.CMD_UPDATE_END);
 
         #endregion
 
         #region 同步方法包装
         
-        public bool Connect(string ip, int port = 5000) => ConnectAsync(ip, port).GetAwaiter().GetResult();
+        public bool Connect(string ip, int commandPort = 8001, int telemetryPort = 8002) => 
+            ConnectAsync(ip, commandPort, telemetryPort).GetAwaiter().GetResult();
         public void SetSpeed(float speed) => SetSpeedAsync(speed).GetAwaiter().GetResult();
-        public void MoveForward() => MoveForwardAsync().GetAwaiter().GetResult();
-        public void MoveBackward() => MoveBackwardAsync().GetAwaiter().GetResult();
+        public void MoveAbs(float distance) => MoveAbsAsync(distance).GetAwaiter().GetResult();
+        public void MoveRel(float distance) => MoveRelAsync(distance).GetAwaiter().GetResult();
         public void MoveStop() => MoveStopAsync().GetAwaiter().GetResult();
-        public void MoveEstop() => MoveEstopAsync().GetAwaiter().GetResult();
-        public void PTZControl(byte camera, short pan, short tilt) => PTZControlAsync(camera, pan, tilt).GetAwaiter().GetResult();
+        public void MoveHome() => MoveHomeAsync().GetAwaiter().GetResult();
+        public void PTZAngle(byte camera, short pan, short tilt) => PTZAngleAsync(camera, pan, tilt).GetAwaiter().GetResult();
+        public void PTZPreset(byte camera, byte presetId) => PTZPresetAsync(camera, presetId).GetAwaiter().GetResult();
         public void PTZReset(byte camera) => PTZResetAsync(camera).GetAwaiter().GetResult();
-        public void PTZSavePreset(byte camera, byte presetId) => PTZSavePresetAsync(camera, presetId).GetAwaiter().GetResult();
-        public void PTZLoadPreset(byte camera, byte presetId) => PTZLoadPresetAsync(camera, presetId).GetAwaiter().GetResult();
-        public void SetLightBrightness(byte brightness) => SetLightBrightnessAsync(brightness).GetAwaiter().GetResult();
-        public void SetFrontLight(bool onoff) => SetFrontLightAsync(onoff).GetAwaiter().GetResult();
-        public void SetRearLight(bool onoff) => SetRearLightAsync(onoff).GetAwaiter().GetResult();
-        public void StartCapture(byte mode = 0) => StartCaptureAsync(mode).GetAwaiter().GetResult();
-        public void StopCapture() => StopCaptureAsync().GetAwaiter().GetResult();
-        public void ForceSaveData() => ForceSaveDataAsync().GetAwaiter().GetResult();
-        public void RequestSelfTest() => RequestSelfTestAsync().GetAwaiter().GetResult();
-        public void CalibrateSensors(byte type) => CalibrateSensorsAsync(type).GetAwaiter().GetResult();
+        public void CameraZoom(byte camera, ushort zoom) => CameraZoomAsync(camera, zoom).GetAwaiter().GetResult();
+        public void CameraFocus(byte camera, ushort focus) => CameraFocusAsync(camera, focus).GetAwaiter().GetResult();
+        public void CameraCapture(byte camera) => CameraCaptureAsync(camera).GetAwaiter().GetResult();
+        public void SetBrightness(byte brightness) => SetBrightnessAsync(brightness).GetAwaiter().GetResult();
+        public void SetLightSwitch(byte lightId, bool onoff) => SetLightSwitchAsync(lightId, onoff).GetAwaiter().GetResult();
+        public void SetDO(byte index, bool value) => SetDOAsync(index, value).GetAwaiter().GetResult();
+        public void GetDI() => GetDIAsync().GetAwaiter().GetResult();
+        public void SetPWM(byte channel, byte dutyCycle) => SetPWMAsync(channel, dutyCycle).GetAwaiter().GetResult();
+        public void RequestStatus() => RequestStatusAsync().GetAwaiter().GetResult();
         public void SyncTime() => SyncTimeAsync().GetAwaiter().GetResult();
-        public void RequestSystemStatus() => RequestSystemStatusAsync().GetAwaiter().GetResult();
-        public void EnterSleep() => EnterSleepAsync().GetAwaiter().GetResult();
-        public void WakeUp() => WakeUpAsync().GetAwaiter().GetResult();
+        public void Heartbeat() => HeartbeatAsync().GetAwaiter().GetResult();
 
         #endregion
     }
@@ -492,7 +567,7 @@ namespace RobotLinkSDK
     public class RobotNACKException : Exception
     {
         public byte Status { get; }
-        public uint Sequence { get; }  // 改为uint
+        public uint Sequence { get; }
         
         public RobotNACKException(byte status, uint sequence) 
             : base($"收到NACK: Status=0x{status:X2}, Seq={sequence}")
@@ -500,5 +575,12 @@ namespace RobotLinkSDK
             Status = status;
             Sequence = sequence;
         }
+    }
+    
+    public class AckFrame
+    {
+        public uint Sequence { get; set; }
+        public byte Status { get; set; }
+        public int FrameLength { get; set; }
     }
 }

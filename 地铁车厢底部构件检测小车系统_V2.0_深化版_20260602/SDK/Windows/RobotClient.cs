@@ -282,9 +282,8 @@ namespace RobotLinkSDK
                 try
                 {
                     int available = _recvLength - _recvOffset;
-                    if (available < 7) // 最少7字节（应答帧最小长度）
+                    if (available < 7)
                     {
-                        // 移动残留数据到缓冲区开头
                         if (_recvOffset > 0)
                         {
                             if (_recvLength > _recvOffset)
@@ -293,9 +292,8 @@ namespace RobotLinkSDK
                             _recvOffset = 0;
                         }
                         
-                        // 如果缓冲区满但数据不足，扩展（理论上不应该发生）
                         if (_recvLength == _recvBuffer.Length)
-                            _recvOffset = 0; // 直接覆盖
+                            _recvOffset = 0;
                     }
                     
                     int bytesRead = await _stream.ReadAsync(_recvBuffer, _recvLength, _recvBuffer.Length - _recvLength, ct);
@@ -332,20 +330,18 @@ namespace RobotLinkSDK
         {
             int offset = _recvOffset;
             
-            while (offset + 7 <= _recvLength) // 最少7字节
+            while (offset + 7 <= _recvLength)
             {
-                // 查找帧头0xAA55
                 if (_recvBuffer[offset] == 0xAA && _recvBuffer[offset + 1] == 0x55)
                 {
                     int frameLen = _recvLength - offset;
                     var ack = TryDecodeAck(_recvBuffer, offset, frameLen);
                     if (ack != null)
                     {
-                        // 尝试匹配等待的应答
                         if (_pendingAcks.TryRemove(ack.Sequence, out var tcs))
                             tcs.TrySetResult(ack);
                         
-                        offset += 7; // 最小应答帧
+                        offset += 7;
                         continue;
                     }
                 }
@@ -355,25 +351,20 @@ namespace RobotLinkSDK
             _recvOffset = offset;
         }
         
-        /// <summary>尝试解码应答帧</summary>
+        /// <summary>尝试解码应答帧（7字节最小帧：Header+Seq+Status+CRC）</summary>
         private AckFrame? TryDecodeAck(byte[] buffer, int offset, int available)
         {
-            if (available < 7) return null; // Header(2) + Seq(2) + Status(1) + CRC(2) = 7
+            if (available < 7) return null;
             
-            // 提取序列号
             ushort seq = (ushort)((buffer[offset + 2]) | (buffer[offset + 3] << 8));
-            
-            // 提取状态
             byte status = buffer[offset + 4];
-            
-            // 验证CRC16（简单校验）
             ushort recvCRC = (ushort)((buffer[offset + 5]) | (buffer[offset + 6] << 8));
             ushort calcCRC = CRC16.Calc(buffer, offset, 5);
             
             if (recvCRC == calcCRC)
                 return new AckFrame { Sequence = seq, Status = status };
             
-            return null; // CRC校验失败
+            return null;
         }
 
         #endregion
@@ -391,25 +382,24 @@ namespace RobotLinkSDK
                     
                     if (!IsConnected) break;
                     
-                    try
-                    {
-                        await HeartbeatAsync();
-                    }
-                    catch (Exception ex)
-                    {
-                        int failures = Interlocked.Increment(ref _consecutiveHeartbeatFailures);
-                        Console.WriteLine($"[RobotClient] 心跳失败: {ex.Message} ({failures}/{MAX_HEARTBEAT_FAILURES})");
-                        
-                        if (failures >= MAX_HEARTBEAT_FAILURES)
-                        {
-                            Console.WriteLine("[RobotClient] 心跳丢失次数过多，触发重连");
-                            _ = ReconnectAsync();
-                        }
-                    }
+                    await HeartbeatAsync();
+                    // 心跳成功，重置失败计数
+                    Interlocked.Exchange(ref _consecutiveHeartbeatFailures, 0);
                 }
                 catch (OperationCanceledException)
                 {
                     break;
+                }
+                catch (Exception ex)
+                {
+                    int failures = Interlocked.Increment(ref _consecutiveHeartbeatFailures);
+                    Console.WriteLine($"[RobotClient] 心跳失败: {ex.Message} ({failures}/{MAX_HEARTBEAT_FAILURES})");
+                    
+                    if (failures >= MAX_HEARTBEAT_FAILURES)
+                    {
+                        Console.WriteLine("[RobotClient] 心跳丢失次数过多，触发重连");
+                        _ = ReconnectAsync();
+                    }
                 }
             }
         }
